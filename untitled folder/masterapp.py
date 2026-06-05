@@ -17,21 +17,6 @@ from pathlib import Path
 from datetime import datetime
 from multiprocessing import Pool, cpu_count
 
-# ── 1-based row numbering for ALL tables ─────────────────────────────────────
-# Users count rows from 1, not 0. Streamlit's default grey index starts at 0.
-# Wrap st.dataframe once so every preview shows a 1-based index (unless the call
-# explicitly hides the index). Fully guarded — never breaks rendering.
-_orig_st_dataframe = st.dataframe
-def _dataframe_1based(data=None, *args, **kwargs):
-    try:
-        if isinstance(data, pd.DataFrame) and not kwargs.get("hide_index", False):
-            data = data.copy()
-            data.index = range(1, len(data) + 1)
-    except Exception:
-        pass
-    return _orig_st_dataframe(data, *args, **kwargs)
-st.dataframe = _dataframe_1based
-
 try:
     from playwright.async_api import async_playwright
     PW_OK = True
@@ -85,8 +70,7 @@ if not _config_path.exists():
 
 DIRS = {
     # ── Top-level ──────────────────────────────────────────────────────────
-    "Main_Data":    ROOT / "Main_Data",          # ONLY the user's own draw data (n-cols)
-    "Global_Scraper": ROOT / "Global_Scraper",   # RAW unprocessed scrapes: D_<STATE>.csv
+    "Main_Data":    ROOT / "Main_Data",          # user's manually-loaded main data
     "Outputs":      ROOT / "Outputs",            # final matched outputs
     "Formulas":     ROOT / "Formulas",           # Container Formula.xlsx lives here
     "Containers":   ROOT / "Containers",
@@ -180,39 +164,54 @@ LOTTO_TYPES = {
 # ═══════════════════════════════════════════════════════════════════════════════
 GAMES_CFG = {
     "pb": {
-        "label": "Powerball", "emoji": "🔵", "pool": 35, "pick": 7,
-        "draw_day": "Thursday",
-        "lottolyzer": "https://en.lottolyzer.com/number-frequencies/australia/powerball",
-        "b_file": "Base_pb.xlsx", "b_sheet": "B_pb",
-        "b_sheet_legacy": "w values Pb A (2)", "thelott_key": "pb",
+        "label":       "Powerball",
+        "emoji":       "🔵",
+        "pool":        35,
+        "pick":        7,
+        "draw_day":    "Thursday",
+        "lottolyzer":  "https://en.lottolyzer.com/number-frequencies/australia/powerball",
+        "b_sheet":     "w values Pb A (2)",
+        "thelott_key": "pb",
     },
     "oz": {
-        "label": "Oz Lotto", "emoji": "🟠", "pool": 47, "pick": 7,
-        "draw_day": "Tuesday",
-        "lottolyzer": "https://en.lottolyzer.com/number-frequencies/australia/oz-lotto",
-        "b_file": "Base_oz.xlsx", "b_sheet": "B_oz",
-        "b_sheet_legacy": "oz (2)", "thelott_key": "oz",
+        "label":       "Oz Lotto",
+        "emoji":       "🟠",
+        "pool":        47,
+        "pick":        7,
+        "draw_day":    "Tuesday",
+        "lottolyzer":  "https://en.lottolyzer.com/number-frequencies/australia/oz-lotto",
+        "b_sheet":     "oz (2)",
+        "thelott_key": "oz",
     },
     "sat": {
-        "label": "Saturday Lotto", "emoji": "🟡", "pool": 45, "pick": 6,
-        "draw_day": "Saturday",
-        "lottolyzer": "https://en.lottolyzer.com/number-frequencies/australia/saturday-lotto",
-        "b_file": "Base_sat.xlsx", "b_sheet": "B_sat",
-        "b_sheet_legacy": "Ta (2)", "thelott_key": "sat",
+        "label":       "Saturday Lotto",
+        "emoji":       "🟡",
+        "pool":        45,
+        "pick":        6,
+        "draw_day":    "Saturday",
+        "lottolyzer":  "https://en.lottolyzer.com/number-frequencies/australia/saturday-lotto",
+        "b_sheet":     "Ta (2)",
+        "thelott_key": "sat",
     },
     "sfl": {
-        "label": "Set for Life", "emoji": "🟢", "pool": 44, "pick": 7,
-        "draw_day": "Daily",
-        "lottolyzer": "https://en.lottolyzer.com/number-frequencies/australia/set-for-life",
-        "b_file": "Base_sfl.xlsx", "b_sheet": "B_sfl",
-        "b_sheet_legacy": "sfl", "thelott_key": "sfl",
+        "label":       "Set for Life",
+        "emoji":       "🟢",
+        "pool":        44,
+        "pick":        7,
+        "draw_day":    "Daily",
+        "lottolyzer":  "https://en.lottolyzer.com/number-frequencies/australia/set-for-life",
+        "b_sheet":     "sfl",
+        "thelott_key": "sfl",
     },
     "mwf": {
-        "label": "Mon/Wed/Fri", "emoji": "🟣", "pool": 45, "pick": 6,
-        "draw_day": "Mon, Wed, Fri",
-        "lottolyzer": "https://en.lottolyzer.com/number-frequencies/australia/monday-lotto",
-        "b_file": "Base_mwf.xlsx", "b_sheet": "B_mwf",      # own file+sheet; was colliding via "Ta (2)"
-        "b_sheet_legacy": "Ta (2)", "thelott_key": "mwf",
+        "label":       "Mon/Wed/Fri",
+        "emoji":       "🟣",
+        "pool":        45,
+        "pick":        6,
+        "draw_day":    "Mon, Wed, Fri",
+        "lottolyzer":  "https://en.lottolyzer.com/number-frequencies/australia/monday-lotto",
+        "b_sheet":     "Ta (2)",
+        "thelott_key": "mwf",
     },
 }
 
@@ -303,15 +302,17 @@ def split_d_by_game(src_csv: Path, root: Path) -> dict:
     state_tag = src_csv.stem   # e.g. "D_NSW_NSW"
     results = {}
 
-    # Columns the downstream pipeline keeps. The row-based collation reads ONLY
-    # w-columns for D (via _to_w_rows), so identity/label columns can no longer leak
-    # into numeric output — which means we can safely retain Draw_Number (+ Draw_Date)
-    # here. The draw number is essential for per-draw coverage analysis.
+    # Columns the downstream pipeline is allowed to see. The metadata columns
+    # (Syndicate_ID kept for ref, but Draw_Number, Outlet_ID, Postcode, Share_Cost,
+    # System_Number, CompanyId, Product, Total_Shares, Available_Shares, …) were
+    # leaking into CVI/BRD numeric output. Keep ONLY: picks (w1…wN), powerball (PB),
+    # and a few harmless identity/label columns for display. This fixes the leak at
+    # the SOURCE so EVERY reader (Variable Inputs, CVI Matrix, collation, dashboards)
+    # gets clean data — not just the build-matrix path.
     def _clean_for_pipeline(gdf: pd.DataFrame) -> pd.DataFrame:
         w_cols = sorted([c for c in gdf.columns if re.match(r'^w\d+$', str(c), re.I)],
                         key=lambda x: int(str(x)[1:]))
-        keep = [c for c in ("Syndicate_ID", "Syndicate_Name", "Game", "Games",
-                            "Draw_Number", "Draw_Date")
+        keep = [c for c in ("Syndicate_ID", "Syndicate_Name", "Game", "Games")
                 if c in gdf.columns]
         if "PB" in gdf.columns:
             keep.append("PB")
@@ -338,49 +339,9 @@ def split_d_by_game(src_csv: Path, root: Path) -> dict:
     return results
 
 
-def combine_states_for_game(game_key: str) -> dict:
-    """Merge every per-state split file for a game into ONE national file.
-
-    Reads all D_<STATE>_<game>.csv in the game's Games_Breakdown folder (e.g.
-    D_NSW_pb.csv, D_VIC_pb.csv, …), concatenates them — each state's syndicates
-    are distinct, so we keep them all (a "national view") — drops only exact
-    duplicate rows (guards against an accidental re-run), and writes
-    D_ALL_<game>.csv. That combined file becomes the default CVI source.
-    Returns {"states": [...], "files": n, "rows": total}.
-    """
-    gb = game_dirs(game_key)["Games_Breakdown"]
-    parts, states = [], []
-    for fp in sorted(gb.glob(f"D_*_{game_key}.csv")):
-        if fp.name.startswith("D_ALL_"):
-            continue
-        try:
-            df = pd.read_csv(fp)
-        except Exception:
-            continue
-        if df.empty:
-            continue
-        # state tag sits between "D_" and f"_{game_key}.csv"
-        tag = fp.stem[2:]
-        if tag.endswith(f"_{game_key}"):
-            tag = tag[: -(len(game_key) + 1)]
-        states.append(tag)
-        parts.append(df)
-    if not parts:
-        return {"states": [], "files": 0, "rows": 0}
-    combined = pd.concat(parts, ignore_index=True)
-    before = len(combined)
-    combined = combined.drop_duplicates().reset_index(drop=True)
-    out = gb / f"D_ALL_{game_key}.csv"
-    combined.to_csv(out, index=False)
-    return {"states": states, "files": len(parts),
-            "rows": len(combined), "dropped_dups": before - len(combined),
-            "path": str(out)}
-
-
 def game_dirs(game_key: str) -> dict:
     """Return DIRS-like dict scoped to a specific game folder."""
     g = ROOT / "Games" / game_key.upper()
-    gb = g / "Games_Breakdown"      # per-game split D lives here (findable, matches tab)
     d = {
         "Game":            g,
         "Main_Data":       g / "Main_Data",
@@ -388,8 +349,7 @@ def game_dirs(game_key: str) -> dict:
         "Formulas":        g / "Formulas",
         "Containers":      g / "Containers",
         "Scraper":         g / "Variables" / "Scraper",
-        "Games_Breakdown": gb,
-        "Direct":          gb,      # alias (legacy key) → same Games_Breakdown folder
+        "Direct":          g / "Variables" / "Variable_Elements" / "Direct",
         "Base":            g / "Variables" / "Variable_Elements" / "Base",
         "Splits":          g / "Variables" / "Variable_Elements" / "Splits",
         "Splits_Combi":    g / "Variables" / "Variable_Elements" / "Splits_Combi",
@@ -1389,362 +1349,53 @@ def run_matching(main_df: pd.DataFrame,
 # ═══════════════════════════════════════════════════════════════════════════════
 # 6. COLLATION ENGINE
 # ═══════════════════════════════════════════════════════════════════════════════
-def sort_d_longest_first(D: pd.DataFrame) -> pd.DataFrame:
-    """Return D with rows ordered LONGEST entry (most numbers) → SHORTEST.
-
-    'Length' = how many w-columns are filled in that row (a System 20 entry = 20,
-    a standard game = 6). Stable sort, so equal-length rows keep their order.
-    """
-    if D is None or D.empty:
-        return D
-    wcols = [c for c in D.columns if re.match(r'^w\d+$', str(c), re.I)]
-    if not wcols:
-        return D
-    lengths = D[wcols].notna().sum(axis=1)
-    order = lengths.sort_values(ascending=False, kind="stable").index
-    return D.loc[order].reset_index(drop=True)
-
-
-def prepare_d_input_sets(D: pd.DataFrame, n: int) -> pd.DataFrame:
-    """Peel off the N LONGEST entries of D as the generator input columns.
-
-    Per the pipeline brief: the longest D rows become the a, b, c, d (… h) input
-    SETS for the generators — Sp/So take the first 4 longest, Ep takes the first 8.
-    Each chosen entry (a row of numbers in D) is laid DOWN one column, so the result
-    is a DataFrame whose columns are a, b, c, … each holding one long entry's numbers.
-
-    Example: D's three System-20 rows + one System-19 row (3+1=4) → columns a,b,c,d.
-    """
-    if D is None or D.empty or n < 1:
-        return pd.DataFrame()
-    wcols = [c for c in D.columns if re.match(r'^w\d+$', str(c), re.I)]
-    if not wcols:
-        return pd.DataFrame()
-    ordered = sort_d_longest_first(D)
-    top = ordered[wcols].head(n)
-    labels = [chr(ord("a") + i) for i in range(n)]  # a, b, c, d, …
-    cols = {}
-    for label, (_, row) in zip(labels, top.iterrows()):
-        nums = [int(x) for x in row.dropna()]
-        cols[label] = pd.Series(nums, dtype="Int64")
-    return pd.DataFrame(cols)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# VARIABLE GENERATORS (all inlined here — one file)
-#   R  ← generate_rainbow        (input: Since-Last table)
-#   Sp ← generate_splits         (input: D's 4 longest rows; auto half-splits)
-#   So ← generate_splits_combi   (input: D's 4 longest rows; auto half-splits)
-#   Ep ← generate_excelpro       (ExcelPro Java→Python; input: D's 8 longest + R wt)  [pending]
-# Each returns COLUMN-oriented sets; the row-collation transposes them into w-rows.
-# Parameters are auto-decided (half-splits, safe-max); the UI offers a timed window
-# to override before the automatic choice is committed.
-# ═════════════════════════════════════════════════════════════════════════════
-def auto_half_splits(sets_dict: dict) -> list:
-    """Split each set in halves, rounding UP: len 20→10, 17→9 (= (len+1)//2)."""
-    return [(len(v) + 1) // 2 for v in sets_dict.values()]
-
-
-def _d_input_to_sets(d_input_df: pd.DataFrame) -> dict:
-    """Columns a,b,c,d… (each a long D entry down the rows) → {label: [numbers]}."""
-    out = {}
-    for col in d_input_df.columns:
-        out[str(col)] = [int(x) for x in d_input_df[col].dropna().tolist()]
-    return out
-
-
-# ── R : Rainbow (ported from task2.py) ──────────────────────────────────────
-def _bounded_combos(keys, max_comb):
-    """Combinations of `keys` sized 1..max_comb, generated directly (no 2**K tail)."""
-    from itertools import chain, combinations
-    keys = list(keys)
-    hi = min(max_comb, len(keys))
-    return chain.from_iterable(combinations(keys, r) for r in range(1, hi + 1))
-
-
-def _combo_count(n_keys, max_comb):
-    from math import comb
-    hi = min(max_comb, n_keys)
-    return sum(comb(n_keys, r) for r in range(1, hi + 1))
-
-
-def _normalise_sl(sl_df: pd.DataFrame) -> pd.DataFrame:
-    df = sl_df.copy()
-    lower = {str(c).strip().lower(): c for c in df.columns}
-    def pick(*cands):
-        for cand in cands:
-            if cand in lower:
-                return lower[cand]
-        return None
-    c_num = pick("numbers", "number", "n", "ball")
-    c_sl = pick("since last", "since_last", "sincelast", "since", "sl")
-    c_keep = pick("to_keep", "to keep", "tokeep", "keep")
-    if c_num is None or c_sl is None:
-        raise ValueError("Since-Last table needs a number column and a 'Since Last' "
-                         "column (got: %s)" % list(df.columns))
-    out = pd.DataFrame({
-        "numbers": pd.to_numeric(df[c_num], errors="coerce"),
-        "since_last": pd.to_numeric(df[c_sl], errors="coerce"),
-    })
-    out["to_keep"] = (pd.to_numeric(df[c_keep], errors="coerce")
-                      if c_keep is not None else out["numbers"])
-    out = out.dropna(subset=["since_last", "numbers"], how="any")
-    out["since_last"] = out["since_last"].astype(int) + 1
-    out["numbers"] = out["numbers"].astype(int)
-    return out
-
-
-def _wt_writer(df: pd.DataFrame) -> pd.DataFrame:
-    """task2.py's 'wt' sheet (SL/wt/…/wt_abcd) — Ep reads this as input2 'All wt'."""
-    listed = df.groupby("since_last")["numbers"].apply(list).to_dict()
-    keep = set(df["to_keep"].dropna().tolist())
-    i0, w0, i1, w1, iF, wF = [], [], [], [], [], []
-    for i in sorted(listed.keys()):
-        i0 += [i] + [None] * (len(listed[i]) - 1)
-        i1 += [i] + [None] * len(listed[i])
-        w0 += listed[i]
-        w1 += listed[i] + [None]
-        kref = [e for e in listed[i] if e in keep]
-        iF += [i] + [None] * (len(kref) - 1)
-        wF += kref
-    gen = [i0, w0, i1, w1, iF, wF]
-    out = pd.DataFrame({n: pd.Series(gen[n]) for n in range(len(gen))})
-    out.columns = ["SL", "wt", "SL_", "wt_", "_SL_", "wt_abcd"]
-    return out
-
-
-def generate_rainbow(sl_df: pd.DataFrame, max_comb=None, combo_guard: int = 200_000):
-    """R from the Since-Last table. Returns (result_df, wt_df, info). Safe-max guard
-    auto-lowers max_comb until the combo-count fits — no 2**K explosion."""
-    df = _normalise_sl(sl_df)
-    grouped = df.groupby("since_last")["numbers"].apply(list).to_dict()
-    to_keep = set(df["to_keep"].dropna().tolist())
-    keys = sorted(grouped.keys())
-    n = len(keys)
-    requested = n if max_comb is None else max(1, min(int(max_comb), n))
-    capped = False
-    while requested > 1 and _combo_count(n, requested) > combo_guard:
-        requested -= 1
-        capped = True
-    result = {}
-    for comb in _bounded_combos(keys, requested):
-        ref = []
-        for g in comb:
-            ref += grouped[g]
-        result[str(comb)] = [e for e in ref if e in to_keep]
-    result_df = pd.DataFrame({k: pd.Series(v, dtype="Int64") for k, v in result.items()})
-    if not result_df.empty:
-        result_df = result_df[result_df.isna().sum().sort_values(kind="stable").index]
-    info = {"n_groups": n, "max_comb": requested,
-            "n_combos": result_df.shape[1], "capped": capped, "combo_guard": combo_guard}
-    return result_df, _wt_writer(df), info
-
-
-# ── Sp : Splits (ported from task1b.py) ──────────────────────────────────────
-def generate_splits(d_input_df: pd.DataFrame, splitter=None) -> pd.DataFrame:
-    """Sp from D's 4 longest rows (columns a,b,c,d). Auto half-splits unless given."""
-    from itertools import combinations
-    sets_ready = _d_input_to_sets(d_input_df)
-    keys = list(sets_ready.keys())
-    if splitter is None:
-        splitter = auto_half_splits(sets_ready)
-    split_sets = {}
-    for idx, k in enumerate(keys):
-        split_sets[k + "0"] = sets_ready[k][:splitter[idx]]
-        split_sets[k + "1"] = sets_ready[k][splitter[idx]:]
-    comb3 = list(combinations(keys, 3))
-    comb2 = list(combinations(keys, 2))
-    let_3, fin_3 = ["e", "f", "g", "h"], ["o", "p", "q", "r"]
-    let_2, fin_2 = ["i", "j", "k", "l", "m", "n"], ["s", "t", "u", "v", "w", "x"]
-    comb3dict, comb2dict, result = {}, {}, {}
-    universe = {e for k in keys for e in sets_ready[k]}
-    for j, comb in enumerate(comb3):
-        iter_set = {e for L in comb for e in sets_ready[L]}
-        i = 0
-        for suffix in ("0", "1"):
-            for letter in comb:
-                comb3dict[let_3[j] + str(i)] = iter_set - set(split_sets[letter + suffix]); i += 1
-    for j, comb in enumerate(comb2):
-        iter_set = {e for L in comb for e in sets_ready[L]}
-        i = 0
-        for suffix in ("0", "1"):
-            for letter in comb:
-                comb2dict[let_2[j] + str(i)] = iter_set - set(split_sets[letter + suffix]); i += 1
-    for i in range(len(let_3)):
-        for j in range(len(comb3dict) // len(let_3)):
-            result[fin_3[i] + str(j)] = universe - comb3dict[let_3[i] + str(j)]
-    for i in range(len(let_2)):
-        for j in range(len(comb2dict) // len(let_2)):
-            result[fin_2[i] + str(j)] = universe - comb2dict[let_2[i] + str(j)]
-    skeys = sorted(split_sets.keys())
-    for i, key in enumerate(split_sets):
-        result[key] = split_sets[key]
-        result["y" + str(i)] = universe - set(split_sets[skeys[i]])
-    result.update(comb3dict)
-    result.update(comb2dict)
-    return pd.DataFrame({k: pd.Series(list(v), dtype="Int64") for k, v in result.items()})
-
-
-# ── So : Splits-combi (ported from automation_vba.py, len==4 branch) ─────────
-def generate_splits_combi(d_input_df: pd.DataFrame, splitter=None) -> pd.DataFrame:
-    """So from D's 4 longest rows (columns a,b,c,d). Auto half-splits unless given.
-    Ports the set algebra of automation_vba.sets_sampling; skips the cosmetic
-    column-relabeling (not needed for the pipeline variable)."""
-    from itertools import combinations
-    sets_ready = _d_input_to_sets(d_input_df)
-    keys = list(sets_ready.keys())
-    if splitter is None:
-        splitter = auto_half_splits(sets_ready)
-    split_sets = {}
-    for idx, k in enumerate(keys):
-        split_sets[k + "0"] = sets_ready[k][:splitter[idx]]
-        split_sets[k + "1"] = sets_ready[k][splitter[idx]:]
-    universe = {e for s in sets_ready.values() for e in s}
-    result = {"U": universe}
-    comb_pairs = {p: set(split_sets[p[0]]) | set(split_sets[p[1]])
-                  for p in combinations(split_sets.keys(), 2)}
-    comb_three = {t: set().union(*[set(sets_ready[x]) for x in t])
-                  for t in combinations(keys, 3)}
-    for ti, tset in comb_three.items():
-        for pj, pset in comb_pairs.items():
-            # original: pair ⊆ triple AND both pair-letters appear in the triple
-            if pset.issubset(tset) and pj[0][0] in ti and pj[1][0] in ti:
-                result["U-" + str(ti) + "-" + str(pj)] = universe - (tset - pset)
-                result[str(ti) + "-" + str(pj)] = tset - pset
-        result[str(ti)] = tset
-    for pj, pset in comb_pairs.items():
-        result["U-" + str(pj)] = universe - pset
-        result[str(pj)] = pset
-    return pd.DataFrame({k: pd.Series(sorted(v), dtype="Int64") for k, v in result.items()})
-
-
-# ── Ep : ExcelPro (ported from Java Main.java — the substantive 'All' output) ─
-def prepare_ep_objects(D: pd.DataFrame, mode: str = "pairs") -> dict:
-    """Build the 4 ExcelPro objects a,b,c,d — each = (arrayOne, arrayTwo) — from D.
-
-    mode='pairs' (default, confirmed): the 8 LONGEST entries paired up
-      (a=#1&#2, b=#3&#4, c=#5&#6, d=#7&#8) — eight distinct longest rows of D, two
-      per object. Ep's to_keep/wt list is supplied by R (rainbow).
-    mode='halves': the 4 LONGEST entries, each split in half (arrayOne=first half,
-      arrayTwo=second half) — kept as an alternative.
-    """
-    if mode == "pairs":
-        inp = prepare_d_input_sets(D, 8)
-        cols = list(inp.columns)
-        objects = {}
-        for i, lab in enumerate(["a", "b", "c", "d"]):
-            one = [int(x) for x in inp[cols[2 * i]].dropna()] if 2 * i < len(cols) else []
-            two = [int(x) for x in inp[cols[2 * i + 1]].dropna()] if 2 * i + 1 < len(cols) else []
-            objects[lab] = (one, two)
-        return objects
-    inp = prepare_d_input_sets(D, 4)
-    objects = {}
-    for col in inp.columns:
-        nums = [int(x) for x in inp[col].dropna()]
-        half = (len(nums) + 1) // 2
-        objects[str(col)] = (nums[:half], nums[half:])
-    return objects
-
-
-def generate_excelpro(objects: dict, wt_list) -> pd.DataFrame:
-    """Ep — the ExcelPro 'All' result. For each pair header (ab,ac,ad,bc,bd,cd) and
-    pair (x,y), emit 4 columns: R's wt numbers landing in x.arrayOne, x.arrayTwo,
-    y.arrayOne, y.arrayTwo. (Faithful to Main.java comboList → 'All'; POI cosmetics
-    dropped — collation only needs the number sets.)"""
-    headers = ["ab", "ac", "ad", "bc", "bd", "cd"]
-    wt = [int(w) for w in wt_list]
-    result = {}
-    for h in headers:
-        x, y = h[0], h[1]
-        xo, xt = set(objects[x][0]), set(objects[x][1])
-        yo, yt = set(objects[y][0]), set(objects[y][1])
-        result["a_" + h] = [w for w in wt if w in xo]
-        result["b_" + h] = [w for w in wt if w in xt]
-        result["c_" + h] = [w for w in wt if w in yo]
-        result["d_" + h] = [w for w in wt if w in yt]
-    return pd.DataFrame({k: pd.Series(v, dtype="Int64") for k, v in result.items()})
-
-
-def _to_w_rows(df: pd.DataFrame, is_direct: bool = False) -> pd.DataFrame:
-    """Return a variable as ROW-oriented w-sets — each ROW is one combination.
-
-    Spreadsheet reality: Excel allows ~1,048,576 ROWS but only 16,384 COLUMNS, so
-    the big dimension (hundreds of thousands of syndicates) must live in ROWS.
-
-      • D (Direct): rows are ALREADY combinations → keep rows, w-columns only.
-        Identified by the caller (is_direct=True) OR by syndicate metadata — so a
-        numbers-only D (no Syndicate_ID/draw columns) is still kept as rows and NOT
-        transposed back into the column wall.
-      • B / R / Ep / Sp / So are stored COLUMN-wise (each column is a combination)
-        → TRANSPOSE so each column becomes a row.
-    """
-    if df is None or df.empty:
-        return pd.DataFrame()
-    wcols = [c for c in df.columns if re.match(r'^w\d+$', str(c), re.I)]
-    D_META = {"syndicate_id", "syndicate_name", "game", "games", "pb",
-              "draw_number", "draw_numbers", "outlet_id", "outlet_name",
-              "postcode", "state", "share_cost", "available_shares",
-              "total_shares", "address", "suburb"}
-    has_d_meta = any(str(c).strip().lower() in D_META for c in df.columns)
-
-    if is_direct or has_d_meta:
-        # D: rows already ARE combinations — keep them, w-columns only.
-        sub = df[wcols] if wcols else df
-        out = sub.reset_index(drop=True)
-    else:
-        # B/R/Ep/Sp/So: columns ARE combinations → transpose to rows.
-        sub = df[wcols] if wcols else df
-        out = sub.T.reset_index(drop=True)
-    # Drop fully-empty rows, coerce to numbers.
-    out = out.apply(pd.to_numeric, errors="coerce")
-    out = out.dropna(how="all").reset_index(drop=True)
-    return out
-
-
 def execute_collation(components: list[str]) -> pd.DataFrame:
     """
-    Build a formula's CVI by STACKING each variable's w-sets as ROWS (vertically)
-    and numbering the position columns w1, w2, … across the widest combination.
+    For each component: take ONLY its number columns (w1…wN, plus PB if present),
+    concatenate, relabel w1, w2, w3… Typed ints throughout.
 
-    Data model (confirmed — ROW orientation, to respect the spreadsheet column
-    ceiling of ~16k columns vs ~1M rows):
-      • Each w-set (a syndicate pick, a base set, a rainbow set, …) is one ROW.
-      • D (Direct) is already row-oriented (one syndicate per row) → kept as rows.
-      • B, R, Ep, Sp, So are stored column-wise → TRANSPOSED so each becomes a row.
-      • A numbered/pure formula (e.g. D1D2D3) = "all of that variable joined" → a
-        SINGLE block (strip trailing digits + de-duplicate): D1D2D3 == one D block.
-    Result is TALL. e.g. sat BRD = B rows + R rows + 354,682 D rows, columns
-    w1…w(longest combination). Matching is row-vs-row against Main_Data.
+    NOTE: previously this did `df.columns[1:]` ("drop col-0, keep the rest"), which
+    is correct for clean B/Ep/Sp/So matrices but WRONG for D — a D file carries
+    metadata (Syndicate_Name, Draw_Number, Outlet_ID, Postcode, Share_Cost, …)
+    after col-0, and those values were being coerced to numbers and concatenated
+    into the CVI/BRD (the 1400151 / 2000 / 1571 leak). Selecting w-columns
+    explicitly fixes the leak for D and hardens every component.
     """
-    # Resolve tokens → base variables: strip trailing digits (D1→D, Sp2→Sp,
-    # B3→B) and de-duplicate while preserving left-to-right order.
-    seen, base_vars = set(), []
-    for comp in components:
-        base = re.sub(r"\d+$", "", str(comp)).strip()
-        if base and base not in seen:
-            seen.add(base)
-            base_vars.append(base)
-
     pieces = []
-    for var in base_vars:
-        df = S.get(var) if S else None
+    for comp in components:
+        df = S.get(comp) if S else None
         if df is None or (isinstance(df, pd.DataFrame) and df.empty):
             continue
-        block = _to_w_rows(df, is_direct=(var == "D"))   # ROW-oriented w-sets
-        if block is None or block.empty:
+        # Prefer explicit number columns: w1…wN (the picks) + optional PB.
+        w_cols = sorted([c for c in df.columns if re.match(r'^w\d+$', str(c), re.I)],
+                        key=lambda x: int(str(x)[1:]))
+        if w_cols:
+            data_cols = w_cols + (["PB"] if "PB" in df.columns else [])
+        else:
+            # No w-columns (e.g. a clean matrix with a leading index col only):
+            # fall back to the original "everything after col-0" behaviour.
+            data_cols = list(df.columns[1:])
+        if not data_cols:
             continue
-        block.columns = [f"w{i+1}" for i in range(len(block.columns))]
-        block.insert(0, "Source", var)  # remember which variable each row came from
-        pieces.append(block)
+        piece = df[data_cols].copy().reset_index(drop=True)
+        for c in piece.columns:
+            piece[c] = pd.to_numeric(piece[c], errors="coerce")
+        pieces.append(piece)
 
     if not pieces:
         return pd.DataFrame()
 
-    # Stack vertically; align to the widest combination (pad missing positions).
-    combined = pd.concat(pieces, axis=0, ignore_index=True)
-    wcols = [c for c in combined.columns if str(c).startswith("w")]
-    combined = combined[["Source"] + wcols]
-    combined.insert(0, "Row", range(1, len(combined) + 1))
+    max_rows = max(len(p) for p in pieces)
+    padded = []
+    for p in pieces:
+        if len(p) < max_rows:
+            pad = pd.DataFrame({c: [None]*(max_rows-len(p)) for c in p.columns})
+            p = pd.concat([p, pad], ignore_index=True)
+        padded.append(p)
+
+    combined = pd.concat(padded, axis=1, ignore_index=True)
+    combined.columns = [f"w{i+1}" for i in range(len(combined.columns))]
+    combined.insert(0, "Row", range(1, len(combined)+1))
     return combined
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2082,7 +1733,7 @@ def _data_status() -> list:
     """Return status info for each D_*.csv file in Main_Data/."""
     rows = []
     for state in ["NSW", "VIC", "QLD", "SA", "TAS"]:
-        fp = DIRS["Global_Scraper"] / f"D_{state}.csv"
+        fp = DIRS["Main_Data"] / f"D_{state}_{state}.csv"
         if fp.exists():
             stat = fp.stat()
             age_h = (datetime.now().timestamp() - stat.st_mtime) / 3600
@@ -2098,7 +1749,7 @@ def _data_status() -> list:
                 "exists": True,
             })
         else:
-            rows.append({"state": state, "file": f"D_{state}.csv",
+            rows.append({"state": state, "file": f"D_{state}_{state}.csv",
                          "rows": 0, "size_kb": 0, "age_h": 9999,
                          "modified": "—", "exists": False})
     return rows
@@ -2135,41 +1786,25 @@ def build_w_matrix(df_raw: pd.DataFrame) -> pd.DataFrame:
 
 
 def d_to_w_only(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a variable as CLEAN w-columns, transposing ONLY raw syndicate data.
+    """Return the D variable as CLEAN w-columns only.
 
-    Two very different shapes arrive here:
-      • RAW D  — one ROW per syndicate, picks in w1…wN, plus syndicate metadata
-                 (Syndicate_ID, Game, Games, PB, Draw_Number, Outlet_ID, …).
-                 This must be TRANSPOSED → one w-column per syndicate.
-      • ALREADY-WIDE (B, R, Ep, Sp, So, or a built W-matrix) — already one COLUMN
-                 per w-set. These must be returned AS-IS (never transposed); we only
-                 drop any stray non-w label column.
-
-    The previous heuristic transposed whenever ANY non-w column was present, which
-    flattened B (720 w-columns) into one long column. The real signal that a frame
-    is raw D is the presence of SYNDICATE METADATA — so we key on that instead.
+    A freshly-loaded D_*.csv carries metadata columns (Syndicate_ID, Draw_Number,
+    Outlet_ID, Postcode, Share_Cost, …) alongside the per-pick w-columns. If those
+    metadata columns reach the collation, their values get treated as numbers and
+    contaminate the output (the 4687 / 1400286 / 2000 leak). This reduces any D
+    frame to just its number content:
+      • if it already looks like a built matrix (only w-columns) → return as-is;
+      • otherwise rebuild it via build_w_matrix (one w-column per syndicate line).
     """
     if df is None or df.empty:
         return df
     wcols = [c for c in df.columns if re.match(r'^w\d+$', str(c), re.I)]
-    ncols = [c for c in df.columns if re.match(r'^n\d+$', str(c), re.I)]
-    D_META = {"syndicate_id", "syndicate_name", "game", "games", "pb",
-              "draw_number", "draw_numbers", "outlet_id", "outlet_name",
-              "postcode", "state", "share_cost", "available_shares",
-              "total_shares", "address", "suburb"}
-    has_d_meta = any(str(c).strip().lower() in D_META for c in df.columns)
-
-    # RAW D (rows = syndicates): transpose to one w-column per syndicate.
-    if has_d_meta:
-        return build_w_matrix(df)
-    # ALREADY-WIDE variable (B/R/Ep/Sp/So or built matrix): keep w-columns as-is.
-    if wcols:
-        return df[wcols]
-    # No w-columns, no D metadata, but n-columns present (main-data style): transpose.
-    if ncols:
-        return build_w_matrix(df)
-    # Nothing recognisable — return unchanged rather than risk a bad transpose.
-    return df
+    meta = [c for c in df.columns if not re.match(r'^[wn]\d+$', str(c), re.I)]
+    # Already clean (a built W-matrix: only w-columns, no metadata)
+    if wcols and not meta:
+        return df
+    # Raw D file (w-columns + metadata, or n-columns): rebuild to w-only matrix
+    return build_w_matrix(df)
 
 
 def slice_variables(w_mat: pd.DataFrame) -> dict:
@@ -2202,67 +1837,6 @@ def slice_variables(w_mat: pd.DataFrame) -> dict:
     so_union = sorted(set(sum(sp_raw.values(),[])))
     return {"Ep": to_df(ep_raw), "Sp": to_df(sp_raw),
             "So": pd.DataFrame({"So_union": so_union})}
-
-
-def fetch_since_last(url: str, pool: int) -> dict | None:
-    """Best-effort scrape of a lottolyzer number-frequencies page.
-
-    Returns {number: since_last} for numbers 1..pool, or None if the page
-    can't be parsed (in which case the caller falls back to manual upload).
-    Runs on the user's machine (this app has network); kept defensive because
-    lottolyzer's markup can change.
-    """
-    try:
-        import urllib.request
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                                         "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                         "Chrome/124.0 Safari/537.36"})
-        html = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "ignore")
-        tables = pd.read_html(html)            # needs lxml/bs4 (usually present)
-    except Exception:
-        return None
-    # Find the table that has a Number column and a "Since Last"-type column.
-    for t in tables:
-        cols = {str(c).strip().lower(): c for c in t.columns}
-        num_c = next((cols[k] for k in cols
-                      if k in ("number", "no", "no.", "ball") or "number" in k), None)
-        sl_c = next((cols[k] for k in cols
-                     if "since" in k or "games since" in k or "last seen" in k), None)
-        if not (num_c and sl_c):
-            continue
-        d = {}
-        for _, row in t.iterrows():
-            try:
-                n = int(float(str(row[num_c]).strip()))
-                s = int(float(str(row[sl_c]).strip()))
-                if 1 <= n <= pool:
-                    d[n] = s
-            except (ValueError, TypeError):
-                pass
-        if d:
-            return d
-    return None
-
-
-def save_since_last(sl_dict: dict, game_key: str, label: str, pool: int,
-                    url: str, sl_file) -> dict:
-    """Persist a since_last dict to since_last.json (shared by fetch + upload)."""
-    all_wt = sorted(sl_dict.keys(), key=lambda n: (sl_dict[n], n))
-    data = {
-        "since_last_dict": {str(k): v for k, v in sl_dict.items()},
-        "all_wt": all_wt,
-        "to_keep": list(all_wt),
-        "game": game_key,
-        "game_name": label,
-        "pool_size": pool,
-        "scraped_at": datetime.now().isoformat(),
-        "url": url,
-    }
-    sl_file.parent.mkdir(parents=True, exist_ok=True)
-    sl_file.write_text(json.dumps(data, indent=2))
-    return data
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 9. UI HELPERS
@@ -2393,7 +1967,7 @@ with st.expander("🕷️ Global Scraper — sweep all states, all games", expan
         <div class="info">
         <b>This page is standalone — not game-specific.</b>
         It sweeps thelott.com for ALL syndicate games at once and saves raw state
-        files to <code>Global_Scraper/</code>. After sweeping, click
+        files to <code>Main_Data/</code>. After sweeping, click
         <b>🔀 Promote All + Split by Game</b> to route each row to its correct
         game folder. The game selector above does not affect this page.
         </div>
@@ -2414,7 +1988,7 @@ with st.expander("🕷️ Global Scraper — sweep all states, all games", expan
         st.markdown("""
         <div class="info">
         <b>Confirmed API</b> — two-step: outlets per postcode → syndicates per outlet batch.<br>
-        No auth, no cookies, no Playwright required. Saves to <code>Global_Scraper/D_{STATE}.csv</code>.<br>
+        No auth, no cookies, no Playwright required. Saves directly to <code>Main_Data/D_{STATE}_{STATE}.csv</code>.<br>
         Coverage: <b>NSW · VIC · QLD · SA · TAS</b> (ACT inside NSW data · NT=0 syndicates · WA=Lotterywest, in-store only).
         </div>
         """, unsafe_allow_html=True)
@@ -2526,7 +2100,7 @@ with st.expander("🕷️ Global Scraper — sweep all states, all games", expan
                 if max_pc:
                     pcs = pcs[:max_pc]
 
-                out_path = DIRS["Global_Scraper"] / f"D_{state}.csv"
+                out_path = DIRS["Main_Data"] / f"D_{state}_{state}.csv"
                 st.markdown(f"**▶ Sweeping {state} — {len(pcs):,} postcodes…**")
                 pb  = st.progress(0)
                 stx = st.empty()
@@ -2642,7 +2216,7 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
         <div class="info">
         One click: reads all D_*.csv files from <b>Main_Data/</b>, splits every row
         by its <b>Games</b> column, saves game-specific files into each game's
-        <code>Games_Breakdown/</code> folder (one per game).<br>
+        <code>Variables/Variable_Elements/Direct/</code> folder.<br>
         Multi-game syndicates (e.g. "Oz Lotto | Powerball") → a copy in <b>each</b>
         matching game folder.<br>
         Mapped: TattsLotto/Gold Lotto/X Lotto → SAT &nbsp;·&nbsp;
@@ -2651,7 +2225,7 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
         </div>
         """, unsafe_allow_html=True)
 
-        raw_d_files = sorted(DIRS["Global_Scraper"].glob("D_*.csv"))
+        raw_d_files = sorted(DIRS["Main_Data"].glob("D_*.csv"))
 
         if raw_d_files:
             # Show quick game breakdown from first available file
@@ -2680,34 +2254,6 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
                     all_results[src.name] = result
                 progress.empty()
 
-                # ── Combine all states into ONE national file per game ────────
-                # Each state's syndicates are distinct; concatenate them so each
-                # game's CVI sees the whole country. Writes D_ALL_<game>.csv.
-                games_touched = set()
-                for res in all_results.values():
-                    for gkey, count in res.items():
-                        if gkey.startswith("_"):
-                            continue
-                        if count and count > 0:
-                            games_touched.add(gkey)
-                combine_rows = []
-                for gkey in sorted(games_touched):
-                    info = combine_states_for_game(gkey)
-                    if info.get("files"):
-                        combine_rows.append({
-                            "Game":   GAMES_CFG[gkey]["label"],
-                            "States combined": ", ".join(info["states"]),
-                            "National rows": f"{info['rows']:,}",
-                            "File": f"D_ALL_{gkey}.csv",
-                        })
-                if combine_rows:
-                    st.markdown('<div class="ok">✅ National combine complete — '
-                                'each game now has a D_ALL_&lt;game&gt;.csv across all '
-                                'states (this is the default CVI source).</div>',
-                                unsafe_allow_html=True)
-                    st.dataframe(pd.DataFrame(combine_rows),
-                                 use_container_width=True)
-
                 # Summary table
                 st.markdown("**Split results:**")
                 summary_rows = []
@@ -2724,7 +2270,7 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
                                 "Source file":   fname,
                                 "Game":          GAMES_CFG[gkey]["label"],
                                 "Rows written":  f"{count:,}",
-                                "Saved to":      f"Games/{gkey.upper()}/Games_Breakdown/",
+                                "Saved to":      f"Games/{gkey.upper()}/…/Direct/",
                             })
 
                 if summary_rows:
@@ -2753,7 +2299,7 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
 
         # ── Single file promote (legacy) ──────────────────────────────────────
         with st.expander("📤 Promote single file to Direct/ (legacy)"):
-            promote_candidates = (sorted(DIRS["Global_Scraper"].glob("D_*.csv")) +
+            promote_candidates = (sorted(DIRS["Main_Data"].glob("D_*.csv")) +
                                   sorted(DIRS["Scraper"].glob("D_*.csv")))
             if promote_candidates:
                 chosen = st.selectbox("File to promote:",
@@ -2788,7 +2334,7 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
         for row in status_rows:
             if not row["exists"]:
                 continue
-            fp = DIRS["Global_Scraper"] / row["file"]
+            fp = DIRS["Main_Data"] / row["file"]
             with st.expander(
                 f"📄 {row['file']}  —  {row['rows']:,} rows  ·  {row['size_kb']} KB  "
                 f"·  updated {row['modified']}"
@@ -2829,7 +2375,7 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
         # ══════════════════════════════════════════════════════════════════════
         with st.expander("⏰ Run sweeps from terminal + Schedule nightly (Mac)"):
             script_path = Path(__file__).resolve()
-            scraper_py  = script_path.parent / "thelott_picks_scraper.py"
+            scraper_py  = script_path.parent / "thelott_syndicate_scraper.py"
             log_path    = ROOT / "logs" / "scraper.log"
             st.markdown(f"""
         **Why use terminal?** Streamlit on Mac has SSL restrictions that can block
@@ -2838,16 +2384,16 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
         **Sweep individual states:**
         ```bash
         cd {script_path.parent}
-        python3 thelott_picks_scraper.py sweep NSW
-        python3 thelott_picks_scraper.py sweep VIC
-        python3 thelott_picks_scraper.py sweep QLD
-        python3 thelott_picks_scraper.py sweep SA
-        python3 thelott_picks_scraper.py sweep TAS
+        python3 thelott_syndicate_scraper.py sweep NSW
+        python3 thelott_syndicate_scraper.py sweep VIC
+        python3 thelott_syndicate_scraper.py sweep QLD
+        python3 thelott_syndicate_scraper.py sweep SA
+        python3 thelott_syndicate_scraper.py sweep TAS
         ```
 
         **Sweep all states at once:**
         ```bash
-        python3 thelott_picks_scraper.py sweep ALL
+        python3 thelott_syndicate_scraper.py sweep ALL
         ```
 
         **After sweeping — split by game (run in terminal):**
@@ -2856,7 +2402,7 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
         import sys; sys.path.insert(0, '{script_path.parent}')
         from masterapp import split_d_by_game, ROOT, DIRS
         from pathlib import Path
-        for f in sorted(DIRS['Global_Scraper'].glob('D_*.csv')):
+        for f in sorted(DIRS['Main_Data'].glob('D_*.csv')):
         r = split_d_by_game(f, ROOT)
         print(f.name, r)
         "
@@ -2866,7 +2412,7 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
         ```bash
         crontab -e
         # Add this line:
-        0 2 * * * cd {script_path.parent} && python3 thelott_picks_scraper.py sweep ALL >> {log_path} 2>&1
+        0 2 * * * cd {script_path.parent} && python3 thelott_syndicate_scraper.py sweep ALL >> {log_path} 2>&1
         ```
             """)
 
@@ -3072,30 +2618,26 @@ elif page == "🔄 CVI Matrix":
     st.markdown(f"""
     <div class="info">
     <b>Active game: {_gcfg['emoji']} {_gcfg['label']}</b><br>
-    Reads D from <code>Games/{_gkey.upper()}/Games_Breakdown/</code>
-    (run <b>Promote All + Split by Game</b> on the Scraper page first).<br>
-    Defaults to <b>D_ALL_{_gkey}.csv</b> — all states combined (national view).
+    Reads D from <code>Games/{_gkey.upper()}/Variables/Variable_Elements/Direct/</code>
+    (game-specific — run <b>Promote All + Split by Game</b> on the Scraper page first).<br>
     Each syndicate row → one w-column. Sorted longest→shortest.
     Ep = top 8 w-columns · Sp = top 4 lanes (a,b,c,d) · So = union combis.
     </div>
     """, unsafe_allow_html=True)
 
-    # Game-specific Games_Breakdown/ folder — national D_ALL first (default)
-    direct_dir = _gdirs["Games_Breakdown"]
-    _all = sorted(direct_dir.glob(f"D_ALL_{_gkey}.csv"))
-    _per_state = sorted(p for p in direct_dir.glob("D_*.csv")
-                        if not p.name.startswith("D_ALL_"))
-    raw_files  = _all + _per_state          # national file listed first
+    # Game-specific Direct/ folder
+    direct_dir = _gdirs["Direct"]
+    raw_files  = sorted(direct_dir.glob("D_*.csv"))
 
-    # Fallback: also show global raw scrapes if game-specific not yet split
-    global_files = sorted(DIRS["Global_Scraper"].glob("D_*.csv"))
+    # Fallback: also show global Main_Data files if game-specific not yet split
+    global_files = sorted(DIRS["Main_Data"].glob("D_*.csv"))
 
     if not raw_files and not global_files:
         st.warning("No D files found. Run the Scraper, then Promote All + Split by Game.")
     else:
         if raw_files:
             st.markdown(f'<div class="ok">✅ {len(raw_files)} game-specific D file(s) '
-                        f'found in Games/{_gkey.upper()}/Games_Breakdown/</div>',
+                        f'found in Games/{_gkey.upper()}/Direct/</div>',
                         unsafe_allow_html=True)
             all_files = raw_files
             file_labels = [f.name for f in all_files]
@@ -3116,20 +2658,8 @@ elif page == "🔄 CVI Matrix":
 
         if st.button("🔄 BUILD W-MATRIX & SLICE Ep / Sp / So",
                      type="primary", use_container_width=True):
-            # ROW-ORIENTATION NOTE: D now stays as ROWS (each syndicate = a row),
-            # because transposing hundreds of thousands of syndicates into columns
-            # exceeds the spreadsheet ceiling (~16k cols). Only transpose for small
-            # files; for large D we keep rows and just slice the placeholder sets.
-            EXCEL_COL_LIMIT = 16384
-            if len(df_raw) > EXCEL_COL_LIMIT:
-                st.info(f"Row orientation: {len(df_raw):,} syndicates exceed the "
-                        f"{EXCEL_COL_LIMIT:,}-column spreadsheet limit, so D is kept "
-                        f"as rows (no transpose). Collate directly in Container "
-                        f"Formula — the CVI stacks w-sets as rows.")
-                w_mat = df_raw  # keep as rows; do not transpose
-            else:
-                with st.spinner("Building…"):
-                    w_mat = build_w_matrix(df_raw)
+            with st.spinner("Transposing…"):
+                w_mat = build_w_matrix(df_raw)
             if w_mat.empty:
                 st.error("No number columns found. A D (syndicate) file needs "
                          "w1…wN columns (main-data n1…nN is also accepted).")
@@ -3138,9 +2668,8 @@ elif page == "🔄 CVI Matrix":
                 # Save CVI matrix to game-specific CVI folder
                 cvi_out = _gdirs["CVI"] / mfname
                 w_mat.to_csv(cvi_out, index=False)
-                st.markdown(f'<div class="ok">✅ W-Matrix: {len(w_mat.columns):,} '
-                            f'w-columns (longest pick = {len(w_mat)} numbers) '
-                            f'→ saved to Games/{_gkey.upper()}/</div>',
+                st.markdown(f'<div class="ok">✅ W-Matrix: {len(w_mat.columns)} w-columns × '
+                            f'{len(w_mat)} rows → saved to Games/{_gkey.upper()}/</div>',
                             unsafe_allow_html=True)
 
                 slices = slice_variables(w_mat)
@@ -3167,13 +2696,13 @@ elif page == "🔄 CVI Matrix":
 
                 c1, c2, c3 = st.columns(3)
                 with c1:
-                    st.markdown("**Ep input** — top 8 cols of D *(feeds ExcelPro; not generated yet)*")
+                    st.markdown("**Ep (top 8)**")
                     st.dataframe(slices["Ep"], height=200, use_container_width=True)
                 with c2:
-                    st.markdown("**Sp input** — top 4 cols of D *(feeds Splits; not generated yet)*")
+                    st.markdown("**Sp lanes a–d** *(Sp=S renamed)*")
                     st.dataframe(slices["Sp"], height=200, use_container_width=True)
                 with c3:
-                    st.markdown("**So input** — union of top 4 *(feeds SplitsCombi; not generated yet)*")
+                    st.markdown("**So (union)**")
                     st.dataframe(slices["So"], height=200, use_container_width=True)
 
         # Browse existing CVI matrices for this game
@@ -3183,17 +2712,8 @@ elif page == "🔄 CVI Matrix":
             cm = st.selectbox("Inspect matrix:", [f.name for f in cvi_files],
                               key="cvi_inspect_sel")
             df_m = pd.read_csv(_gdirs["CVI"] / cm)
-            n_cols_m = len(df_m.columns)
-            # "depth" wording removed — per the data model, COLUMNS are the
-            # syndicate w-columns and a column's LENGTH is its pick count; the
-            # matrix is as many rows tall as the LONGEST column (longest pick).
-            longest = int(df_m.notna().sum(axis=0).max()) if n_cols_m else 0
-            st.write(f"{n_cols_m:,} w-columns (w1…w{n_cols_m}) · "
-                     f"longest column = {longest} numbers")
-            n_show = min(60, n_cols_m)
-            if n_cols_m > n_show:
-                st.caption(f"Preview — first {n_show} of {n_cols_m:,} columns:")
-            st.dataframe(df_m.iloc[:, :n_show], use_container_width=True, height=300)
+            st.write(f"{len(df_m.columns)} w-columns · depth: {len(df_m)} rows")
+            st.dataframe(df_m, use_container_width=True, height=300)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE: VARIABLE INPUTS
@@ -3211,10 +2731,10 @@ elif page == "🧩 Variable Inputs":
     <div class="info">
     <b>Active game: {_gcfg['emoji']} {_gcfg['label']}</b> — Pool 1–{_gcfg['pool']},
     Pick {_gcfg['pick']}, draws {_gcfg['draw_day']}.<br>
-    <b>B</b> = pre-loaded w-columns from <b>Base_&lt;game&gt;.xlsx</b> (e.g. Base_sat.xlsx, sheet B_sat; rarely changes).<br>
-    <b>Ep</b> = ExcelPro INPUT: top 8 w-columns of D (generation code not wired yet — shown as input).<br>
-    <b>Sp</b> = Splits INPUT (task1b): top 4 w-columns of D (generation not wired yet — shown as input).<br>
-    <b>So</b> = SplitsCombi INPUT (auto_vba): top 4 w-columns of D (generation not wired yet — shown as input).<br>
+    <b>B</b> = pre-loaded w-columns from f_rules_Gclaude.xlsx (rarely changes).<br>
+    <b>Ep</b> = ExcelPro: top 8 w-columns of D → new w-sets.<br>
+    <b>Sp</b> = Splits (task1b): top 4 w-columns of D + 4 split points → split sets.<br>
+    <b>So</b> = SplitsCombi (auto_vba): same top 4 w-columns → union combinations.<br>
     <b>R</b>  = Rainbow (task2): Since Last from lottolyzer → powerset combos.<br>
     <b>D</b>  = Syndicate w-columns (standalone + feeds formula row 11).
     </div>
@@ -3227,30 +2747,16 @@ elif page == "🧩 Variable Inputs":
     # ── TAB: B (Base) ──────────────────────────────────────────────────────
     with vtabs[0]:
         st.markdown(f"**B — Base variable for {_gcfg['label']}** "
-                    f"(sheet: `{_gcfg['b_sheet']}` in {_gcfg.get('b_file','Base.xlsx')})")
+                    f"(sheet: `{_gcfg['b_sheet']}` in f_rules_Gclaude.xlsx)")
 
-        # Load B: prefer this game's own Base_<game>.xlsx; then a shared Base.xlsx;
-        # then the legacy f_rules_Gclaude.xlsx. Non-breaking migration.
-        b_file = _gcfg.get("b_file", "Base.xlsx")
-        b_rules_candidates = (list(ROOT.rglob(b_file))
-                              or list(ROOT.rglob("Base.xlsx"))
-                              or list(ROOT.rglob("f_rules_Gclaude.xlsx")))
+        # Load B from uploaded rules file
+        b_rules_candidates = list(ROOT.rglob("f_rules_Gclaude.xlsx"))
         if b_rules_candidates:
             b_rules_path = b_rules_candidates[0]
             try:
                 xl_b = pd.ExcelFile(b_rules_path, engine="openpyxl")
-                # Prefer this game's clean sheet (B_pb/B_sat/…); then the uppercase
-                # key (PB/SAT/…); then the legacy cryptic sheet name; finally, if the
-                # workbook is a single-game file, just use its only sheet.
-                sheet = None
-                gk = _gkey.upper()
-                for cand in (_gcfg.get("b_sheet"), gk, _gcfg.get("b_sheet_legacy")):
-                    if cand and cand in xl_b.sheet_names:
-                        sheet = cand
-                        break
-                if sheet is None and len(xl_b.sheet_names) == 1:
-                    sheet = xl_b.sheet_names[0]   # per-game file with one sheet
-                if sheet is not None:
+                sheet = _gcfg["b_sheet"]
+                if sheet in xl_b.sheet_names:
                     df_b_raw = xl_b.parse(sheet, header=None)
                     # Row 0 = w-column headers, rows 1+ = data
                     w_cols_b = [str(df_b_raw.iloc[0, c])
@@ -3269,7 +2775,7 @@ elif page == "🧩 Variable Inputs":
                         S["B"] = df_b
                         st.markdown(
                             f'<div class="ok">✅ B loaded: {len(b_data)} w-columns '
-                            f'from sheet <b>{sheet}</b> in {b_rules_path.name}</div>',
+                            f'from sheet <b>{sheet}</b></div>',
                             unsafe_allow_html=True)
                         # Show w-column lengths
                         len_info = {wc: len(b_data[wc].dropna()) for wc in b_data}
@@ -3281,15 +2787,11 @@ elif page == "🧩 Variable Inputs":
                     else:
                         st.warning(f"Sheet '{sheet}' found but no numeric w-columns parsed.")
                 else:
-                    st.warning(f"No B sheet for this game. Looked for "
-                               f"'{_gcfg.get('b_sheet')}' (or legacy "
-                               f"'{_gcfg.get('b_sheet_legacy')}'). "
-                               f"Available: {xl_b.sheet_names}")
+                    st.warning(f"Sheet '{sheet}' not found. Available: {xl_b.sheet_names}")
             except Exception as ex:
-                st.error(f"Error reading {b_rules_path.name}: {ex}")
+                st.error(f"Error reading f_rules_Gclaude.xlsx: {ex}")
         else:
-            st.markdown(f'<div class="warn">{b_file} not found in project folder '
-                        '(shared Base.xlsx or legacy f_rules_Gclaude.xlsx also accepted). '
+            st.markdown('<div class="warn">f_rules_Gclaude.xlsx not found in project folder. '
                         'Upload it below.</div>', unsafe_allow_html=True)
             up_b = st.file_uploader("Upload f_rules_Gclaude.xlsx",
                                     type=["xlsx"], key="up_b_rules")
@@ -3303,17 +2805,6 @@ elif page == "🧩 Variable Inputs":
         st.markdown("**R — Rainbow (task2.py): Since Last → powerset combos**")
 
         sl_file = _gdirs["SinceLast"] / "since_last.json"
-        # Auto-fetch from lottolyzer if we don't have it cached yet.
-        if not sl_file.exists():
-            with st.spinner(f"Fetching Since Last from lottolyzer for {_gcfg['label']}…"):
-                sl_dict_auto = fetch_since_last(_gcfg["lottolyzer"], _gcfg["pool"])
-            if sl_dict_auto:
-                save_since_last(sl_dict_auto, _gkey, _gcfg["label"],
-                                _gcfg["pool"], _gcfg["lottolyzer"], sl_file)
-                st.markdown(
-                    f'<div class="ok">✅ Auto-fetched Since Last — '
-                    f'{len(sl_dict_auto)} numbers from lottolyzer.</div>',
-                    unsafe_allow_html=True)
         if sl_file.exists():
             try:
                 sl_data = json.loads(sl_file.read_text())
@@ -3331,44 +2822,55 @@ elif page == "🧩 Variable Inputs":
                 st.write(f"**all_wt** (first 15 / most recent → oldest): "
                          f"`{all_wt[:15]}...`")
 
-                # AUTO: pick the highest SAFE max_comb (no malfunction). Tick the
-                # box to intervene with a manual value instead.
-                _n_groups = len(set(int(v) + 1 for v in since_last_dict.values()))
-                manual_max = None
-                if st.checkbox("Set max groups manually (else auto safe-max)",
-                               key="r_manual"):
-                    manual_max = st.slider("Max Since Last groups to combine:",
-                                           1, max(2, _n_groups), min(3, _n_groups),
-                                           key="r_max_comb")
+                max_comb = st.slider("Max Since Last groups to combine:", 1, 8, 3,
+                                     key="r_max_comb")
+
                 if st.button("▶ Generate Rainbow (R)", key="gen_R",
                              type="primary", use_container_width=True):
-                    try:
-                        sl_df = pd.DataFrame({
-                            "numbers": list(since_last_dict.keys()),
-                            "Since Last": list(since_last_dict.values()),
-                        })
-                        sl_df["to_keep"] = pd.Series(all_wt)
-                        r_df, r_wt, r_info = generate_rainbow(sl_df, max_comb=manual_max)
-                        S["R"] = r_df
-                        S["_R_wt"] = r_wt    # R's to_keep/wt -> Ep input2
-                        r_path = _gdirs["Rainbow"] / f"R_{_gkey}.csv"
-                        r_df.to_csv(r_path, index=False)
-                        _cap = " (auto-capped to stay safe)" if r_info["capped"] else ""
-                        st.markdown(
-                            f'<div class="ok">✅ R generated: {r_info["n_combos"]} combos '
-                            f'from {r_info["n_groups"]} groups · max_comb={r_info["max_comb"]}'
-                            f'{_cap} → {r_path.name}</div>', unsafe_allow_html=True)
-                        st.dataframe(r_df.head(20), use_container_width=True, height=280)
-                    except Exception as ex:
-                        st.error(f"Rainbow error: {ex}")
+                    from itertools import chain, combinations as _combos
+
+                    def _powerset(iterable):
+                        s = list(iterable)
+                        return chain.from_iterable(
+                            _combos(s, r) for r in range(1, len(s)+1))
+
+                    # Group by Since Last (+1 as in task2.py)
+                    grouped: dict[int, list] = {}
+                    for num, sl in since_last_dict.items():
+                        grouped.setdefault(int(sl) + 1, []).append(num)
+
+                    sl_keys = sorted(grouped.keys())
+                    combos = [c for c in _powerset(sl_keys)
+                              if 1 <= len(c) <= max_comb]
+                    to_keep_set = set(all_wt)
+                    result = {}
+                    for combo in combos:
+                        ref = []
+                        for sl_val in combo:
+                            ref += grouped[sl_val]
+                        keep_ = [n for n in ref if n in to_keep_set]
+                        result[str(combo)] = keep_
+
+                    r_df = pd.DataFrame(
+                        {k: pd.Series(v) for k, v in result.items()})
+                    order = r_df.isna().sum().sort_values().index
+                    r_df = r_df[order]
+                    S["R"] = r_df
+
+                    r_path = _gdirs["Rainbow"] / f"R_{_gkey}.csv"
+                    r_df.to_csv(r_path, index=False)
+                    st.markdown(
+                        f'<div class="ok">✅ R generated: {r_df.shape[1]} columns '
+                        f'→ saved to {r_path.name}</div>',
+                        unsafe_allow_html=True)
+                    st.dataframe(r_df.head(20), use_container_width=True, height=280)
 
             except Exception as ex:
                 st.error(f"Error loading Since Last: {ex}")
         else:
             st.markdown(
-                '<div class="warn">⚠️ Couldn\'t auto-fetch Since Last from lottolyzer '
-                '(page may be unreachable or its layout changed). Use the '
-                '<b>Since Last</b> tab to fetch again or upload it manually.</div>',
+                '<div class="warn">⚠️ Since Last data not found for this game. '
+                'Go to the <b>Since Last</b> tab to fetch it from lottolyzer.</div>',
                 unsafe_allow_html=True)
 
         if not S.get("R", pd.DataFrame()).empty:
@@ -3724,18 +3226,6 @@ elif page == "🧩 Variable Inputs":
         st.markdown(f"Source: [{sl_url}]({sl_url})")
 
         sl_file = _gdirs["SinceLast"] / "since_last.json"
-
-        if st.button("⤓ Fetch now from lottolyzer", type="primary",
-                     use_container_width=True, key="fetch_sl_now"):
-            with st.spinner("Fetching from lottolyzer…"):
-                d = fetch_since_last(sl_url, _gcfg["pool"])
-            if d:
-                save_since_last(d, _gkey, _gcfg["label"], _gcfg["pool"],
-                                sl_url, sl_file)
-                st.success(f"Fetched and cached {len(d)} numbers. Refresh to see the table.")
-            else:
-                st.error("Couldn't parse lottolyzer (unreachable or layout changed). "
-                         "Use the manual upload below.")
         if sl_file.exists():
             try:
                 sl_data = json.loads(sl_file.read_text())
@@ -3870,18 +3360,10 @@ elif page == "📦 Container Formula":
     chosen_f = st.selectbox("Collate formula:", active_names)
     comps = COMP_MAP.get(chosen_f, [])
     st.write(f"**Components:** {' + '.join(comps)}")
-    # Resolve to base variables (strip trailing digits, de-dup) — must match
-    # execute_collation, so D1D2D3 checks for D (not D1/D2/D3), B1B2B3 → B, etc.
-    _seen, base_needed = set(), []
-    for c in comps:
-        b = re.sub(r"\d+$", "", str(c)).strip()
-        if b and b not in _seen:
-            _seen.add(b); base_needed.append(b)
-    missing = [b for b in base_needed if b not in S or
-               (isinstance(S.get(b), pd.DataFrame) and S[b].empty)]
+    missing = [c for c in comps if c not in S or
+               (isinstance(S.get(c), pd.DataFrame) and S[c].empty)]
     if missing:
-        st.markdown(f'<div class="warn">⚠️ Missing/empty: {missing} '
-                    f'(load these in Variable Inputs, or Build W-Matrix for D)</div>',
+        st.markdown(f'<div class="warn">⚠️ Missing/empty: {missing}</div>',
                     unsafe_allow_html=True)
 
     if st.button(f"▶ Collate {chosen_f}", type="primary", use_container_width=True):
@@ -3893,20 +3375,10 @@ elif page == "📦 Container Formula":
             out = DIRS["CVI"] / f"CVI_{chosen_f}.csv"
             result.to_csv(out, index=False)
             S["cvi"][chosen_f] = result
-            n_wcols = sum(1 for c in result.columns if str(c).startswith("w"))
-            st.markdown(f'<div class="ok">✅ {chosen_f}: {len(result):,} rows '
-                        f'(w-sets) × {n_wcols} number columns (w1…w{n_wcols}) '
-                        f'→ <code>{out.name}</code></div>',
+            st.markdown(f'<div class="ok">✅ {chosen_f}: {len(result)} rows × '
+                        f'{len(result.columns)} cols → <code>{out.name}</code></div>',
                         unsafe_allow_html=True)
-            # Tall result (hundreds of thousands of rows) — show only a small slice;
-            # full matrix is saved to disk and available via the download button.
-            n_show_c = min(60, result.shape[1])
-            n_show_r = min(50, result.shape[0])
-            if result.shape[0] > n_show_r:
-                st.caption(f"Preview — first {n_show_r} of {result.shape[0]:,} rows "
-                           f"(full matrix saved to disk):")
-            st.dataframe(result.iloc[:n_show_r, :n_show_c],
-                         use_container_width=True, height=300)
+            st.dataframe(result, use_container_width=True, height=260)
             st.download_button(f"⬇ CVI_{chosen_f}.csv", to_csv_bytes(result),
                                f"CVI_{chosen_f}.csv","text/csv")
 
@@ -4125,12 +3597,9 @@ elif page == "🖥️ Container Dashboards":
     # ── Auto-load SC ───────────────────────────────────────────────────────
     sc_auto = {}
     sc_folder = DIRS["Selected_Counts"]
-    for sc_file in (sorted(sc_folder.glob(f"SC_{formula_name}*.csv")) +
-                    sorted(sc_folder.glob(f"SC_{formula_name}*.xlsx"))):
+    for sc_file in sc_folder.glob(f"SC_{formula_name}*.csv"):
         try:
-            df_sc = (pd.read_excel(sc_file, engine="openpyxl")
-                     if sc_file.suffix.lower() == ".xlsx"
-                     else pd.read_csv(sc_file))
+            df_sc = pd.read_csv(sc_file)
             if "w" in df_sc.columns and "Selected Count" in df_sc.columns:
                 for _, row in df_sc.iterrows():
                     sc_auto[str(row["w"])] = str(row["Selected Count"])
@@ -4164,21 +3633,6 @@ elif page == "🖥️ Container Dashboards":
                 ]), use_container_width=True, hide_index=True)
         else:
             st.warning("⚠️ SC not loaded")
-            up_sc = st.file_uploader(
-                "Upload SC (cols: w, Selected Count)", type=["csv"],
-                key="dash_sc_upload", label_visibility="collapsed")
-            if up_sc is not None:
-                try:
-                    df_up = pd.read_csv(up_sc)
-                    if "w" in df_up.columns and "Selected Count" in df_up.columns:
-                        sc_folder.mkdir(parents=True, exist_ok=True)
-                        dest = sc_folder / f"SC_{formula_name}.csv"
-                        df_up.to_csv(dest, index=False)
-                        st.success(f"Saved → {dest.name}. Refresh to load.")
-                    else:
-                        st.error("Need columns: 'w' and 'Selected Count'.")
-                except Exception as ex:
-                    st.error(f"Upload error: {ex}")
 
     with pv3:
         if not main_df.empty:

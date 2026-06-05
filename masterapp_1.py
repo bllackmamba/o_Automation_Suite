@@ -196,6 +196,9 @@ GAMES_CFG = {
     "sat": {
         "label": "Saturday Lotto", "emoji": "🟡", "pool": 45, "pick": 6,
         "draw_day": "Saturday",
+        # NOTE: If this URL opens Set for Life instead of Saturday Lotto, override
+        # it in the Since Last tab (Variable Inputs → Since Last → URL field).
+        # Known alternative: https://en.lottolyzer.com/number-frequencies/australia/tatts-lotto
         "lottolyzer": "https://en.lottolyzer.com/number-frequencies/australia/saturday-lotto",
         "b_file": "Base_sat.xlsx", "b_sheet": "B_sat",
         "b_sheet_legacy": "Ta (2)", "thelott_key": "sat",
@@ -2371,6 +2374,43 @@ st.markdown("""
       color:#1a1300 !important;
       font-weight:900 !important;
   }
+
+  /* ── Game selector PRIMARY buttons — make selected game very obvious ── */
+  /* Secondary (inactive) game buttons — cool dark background, clear text */
+  div[data-testid="stHorizontalBlock"] button[kind="secondary"],
+  div[data-testid="column"] button[kind="secondary"]{
+      background:#1f2d45 !important;
+      border:1.5px solid #3a4e6e !important;
+      color:#b8cce4 !important;
+      font-weight:600 !important;
+  }
+  /* Primary (active) game button — bright amber, impossible to miss */
+  div[data-testid="stHorizontalBlock"] button[kind="primary"],
+  div[data-testid="column"] button[kind="primary"]{
+      background:linear-gradient(135deg,#f4a000,#ffcc44) !important;
+      border:2px solid #ffd166 !important;
+      color:#1a1300 !important;
+      font-weight:900 !important;
+      box-shadow:0 0 10px rgba(244,160,0,.5) !important;
+  }
+
+  /* ── Variable Input sub-tabs — make Streamlit tab bar highly visible ── */
+  div[data-testid="stTabs"] button[role="tab"]{
+      font-weight:700 !important;
+      font-size:.88rem !important;
+      color:#c5d6f0 !important;
+      border-bottom:2px solid transparent !important;
+      padding:8px 16px !important;
+  }
+  div[data-testid="stTabs"] button[role="tab"][aria-selected="true"]{
+      color:#ffd166 !important;
+      border-bottom:2px solid #f4a000 !important;
+      font-weight:900 !important;
+  }
+  div[data-testid="stTabs"] button[role="tab"]:hover{
+      color:#ffffff !important;
+      background:#243049 !important;
+  }
 </style>
 """, unsafe_allow_html=True)
 
@@ -2800,10 +2840,34 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
                     gc = df_view["Games"].value_counts().reset_index()
                     gc.columns = ["Game", "Rows"]
                     st.dataframe(gc, use_container_width=True, height=200)
+
+                # ── Current draw vs future draws ───────────────────────────
+                if "Draw_Date" in df_view.columns:
+                    try:
+                        _dv_dd = pd.to_datetime(df_view["Draw_Date"], errors="coerce")
+                        _dv_sorted = sorted(_dv_dd.dropna().unique())
+                        if _dv_sorted:
+                            _dv_cur  = _dv_sorted[0]
+                            _dv_fut  = [d for d in _dv_sorted if d > _dv_cur]
+                            _dv_c1, _dv_c2 = st.columns(2)
+                            _n_cur_dv = int((_dv_dd == _dv_cur).sum())
+                            _n_fut_dv = int((_dv_dd.isin(_dv_fut)).sum())
+                            _dv_c1.metric(
+                                "📅 Current draw syndicates", f"{_n_cur_dv:,}",
+                                help=f"Draw date: {str(_dv_cur.date())}")
+                            _dv_c2.metric(
+                                "🔮 Future draw syndicates", f"{_n_fut_dv:,}",
+                                help=f"{len(_dv_fut)} future date(s)")
+                    except Exception:
+                        pass
+
                 st.dataframe(df_view.head(10), use_container_width=True)
-                st.download_button(f"⬇ Download {row['file']}", to_csv_bytes(df_view),
-                                   row["file"], "text/csv",
-                                   key=f"dl_view_{row['state']}")
+                st.download_button(
+                    f"⬇ Download {row['file']} — all {len(df_view):,} rows",
+                    to_csv_bytes(df_view),
+                    row["file"], "text/csv",
+                    key=f"dl_view_{row['state']}"
+                )
 
         st.markdown("---")
 
@@ -2831,44 +2895,52 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
             script_path = Path(__file__).resolve()
             scraper_py  = script_path.parent / "thelott_picks_scraper.py"
             log_path    = ROOT / "logs" / "scraper.log"
-            st.markdown(f"""
-        **Why use terminal?** Streamlit on Mac has SSL restrictions that can block
-        outbound API calls. Running from terminal bypasses this completely.
 
-        **Sweep individual states:**
-        ```bash
-        cd {script_path.parent}
-        python3 thelott_picks_scraper.py sweep NSW
-        python3 thelott_picks_scraper.py sweep VIC
-        python3 thelott_picks_scraper.py sweep QLD
-        python3 thelott_picks_scraper.py sweep SA
-        python3 thelott_picks_scraper.py sweep TAS
-        ```
+            st.markdown(
+                '<div class="note">💡 <b>Tip:</b> Use the <b>SWEEP STATES</b> buttons in '
+                'Section 2 above for in-app scraping. Only drop to terminal if '
+                'Streamlit SSL blocks the network calls.</div>',
+                unsafe_allow_html=True)
 
-        **Sweep all states at once:**
-        ```bash
-        python3 thelott_picks_scraper.py sweep ALL
-        ```
+            st.markdown("**Copy a command → paste directly into your terminal:**")
 
-        **After sweeping — split by game (run in terminal):**
-        ```bash
-        python3 -c "
-        import sys; sys.path.insert(0, '{script_path.parent}')
-        from masterapp import split_d_by_game, ROOT, DIRS
-        from pathlib import Path
-        for f in sorted(DIRS['Global_Scraper'].glob('D_*.csv')):
-        r = split_d_by_game(f, ROOT)
-        print(f.name, r)
-        "
-        ```
+            # Individual state commands — each in its own copy-friendly block
+            _cmds_state = {
+                "NSW": f"cd {script_path.parent} && python3 thelott_picks_scraper.py sweep NSW",
+                "VIC": f"cd {script_path.parent} && python3 thelott_picks_scraper.py sweep VIC",
+                "QLD": f"cd {script_path.parent} && python3 thelott_picks_scraper.py sweep QLD",
+                "SA":  f"cd {script_path.parent} && python3 thelott_picks_scraper.py sweep SA",
+                "TAS": f"cd {script_path.parent} && python3 thelott_picks_scraper.py sweep TAS",
+            }
+            for _state, _cmd in _cmds_state.items():
+                st.markdown(f"**Sweep {_state}:**")
+                st.code(_cmd, language="bash")
 
-        **Schedule nightly at 2am (crontab):**
-        ```bash
-        crontab -e
-        # Add this line:
-        0 2 * * * cd {script_path.parent} && python3 thelott_picks_scraper.py sweep ALL >> {log_path} 2>&1
-        ```
-            """)
+            st.markdown("**Sweep ALL states at once (recommended):**")
+            st.code(
+                f"cd {script_path.parent} && python3 thelott_picks_scraper.py sweep ALL",
+                language="bash")
+
+            st.markdown("**After sweeping — split and combine by game:**")
+            st.code(
+                f"cd {script_path.parent} && python3 -c \"\n"
+                f"import sys; sys.path.insert(0, '.')\n"
+                f"from masterapp import split_d_by_game, combine_states_for_game, ROOT, DIRS\n"
+                f"from pathlib import Path\n"
+                f"for f in sorted(DIRS['Global_Scraper'].glob('D_*.csv')):\n"
+                f"    r = split_d_by_game(f, ROOT)\n"
+                f"    print(f.name, r)\n"
+                f"\"",
+                language="bash")
+
+            st.markdown("**Schedule nightly at 2 am (Mac crontab):**")
+            st.code(
+                f"# 1. Open crontab editor:\n"
+                f"crontab -e\n\n"
+                f"# 2. Add this line, then save:\n"
+                f"0 2 * * * cd {script_path.parent} && "
+                f"python3 thelott_picks_scraper.py sweep ALL >> {log_path} 2>&1",
+                language="bash")
 
 
 st.markdown("---")
@@ -3274,10 +3346,34 @@ elif page == "🧩 Variable Inputs":
                         # Show w-column lengths
                         len_info = {wc: len(b_data[wc].dropna()) for wc in b_data}
                         st.write("Column lengths:", len_info)
-                        st.dataframe(df_b, use_container_width=True, height=280)
-                        st.download_button("⬇ Download B.csv",
-                                           to_csv_bytes(df_b), "B.csv",
-                                           "text/csv", key="dl_b_rules")
+
+                        # ── View toggle: columns (as stored) vs rows ──────────
+                        _b_view = st.radio(
+                            "Display B as:",
+                            ["Columns (as stored — each w is a column)",
+                             "Rows (after transpose — each w becomes a row)"],
+                            horizontal=True,
+                            key="b_view_mode"
+                        )
+                        if _b_view.startswith("Rows"):
+                            # Transpose so each w-column becomes a numbered row
+                            df_b_T = df_b.T.reset_index()
+                            df_b_T.columns = ["w"] + [f"pos_{i+1}"
+                                                       for i in range(df_b_T.shape[1]-1)]
+                            st.markdown(
+                                '<div class="info">ℹ️ B transposed — each row is one '
+                                'w-set; numbers run across columns (pos_1, pos_2, …). '
+                                'This is how B feeds the collation engine.</div>',
+                                unsafe_allow_html=True)
+                            st.dataframe(df_b_T, use_container_width=True, height=280)
+                            st.download_button("⬇ Download B_as_rows.csv",
+                                               to_csv_bytes(df_b_T), "B_as_rows.csv",
+                                               "text/csv", key="dl_b_rows")
+                        else:
+                            st.dataframe(df_b, use_container_width=True, height=280)
+                            st.download_button("⬇ Download B.csv",
+                                               to_csv_bytes(df_b), "B.csv",
+                                               "text/csv", key="dl_b_rules")
                     else:
                         st.warning(f"Sheet '{sheet}' found but no numeric w-columns parsed.")
                 else:
@@ -3290,13 +3386,60 @@ elif page == "🧩 Variable Inputs":
         else:
             st.markdown(f'<div class="warn">{b_file} not found in project folder '
                         '(shared Base.xlsx or legacy f_rules_Gclaude.xlsx also accepted). '
-                        'Upload it below.</div>', unsafe_allow_html=True)
-            up_b = st.file_uploader("Upload f_rules_Gclaude.xlsx",
-                                    type=["xlsx"], key="up_b_rules")
+                        'Upload it below — the app will load it immediately.</div>',
+                        unsafe_allow_html=True)
+            up_b = st.file_uploader(
+                f"Upload {b_file} (or Base.xlsx / f_rules_Gclaude.xlsx)",
+                type=["xlsx"], key="up_b_rules")
             if up_b:
-                dest = ROOT / "f_rules_Gclaude.xlsx"
-                dest.write_bytes(up_b.read())
-                st.success(f"Saved to {dest}. Refresh the page.")
+                # Save under both the game-specific name AND the legacy name
+                dest_game   = ROOT / b_file
+                dest_legacy = ROOT / "f_rules_Gclaude.xlsx"
+                _raw = up_b.read()
+                dest_game.write_bytes(_raw)
+                if dest_game != dest_legacy:
+                    dest_legacy.write_bytes(_raw)
+                st.success(f"Saved to {dest_game.name}. Loading now…")
+                # Immediately parse and load B so user doesn't need to refresh
+                try:
+                    xl_up = pd.ExcelFile(dest_game, engine="openpyxl")
+                    _sheet_up = None
+                    for _cand in (_gcfg.get("b_sheet"), _gkey.upper(),
+                                  _gcfg.get("b_sheet_legacy")):
+                        if _cand and _cand in xl_up.sheet_names:
+                            _sheet_up = _cand
+                            break
+                    if _sheet_up is None and len(xl_up.sheet_names) == 1:
+                        _sheet_up = xl_up.sheet_names[0]
+                    if _sheet_up:
+                        _df_b_up = xl_up.parse(_sheet_up, header=None)
+                        _w_cols_up = [str(_df_b_up.iloc[0, c])
+                                      for c in range(_df_b_up.shape[1])
+                                      if str(_df_b_up.iloc[0, c]).startswith("w")]
+                        _b_data_up = {}
+                        for _i, _wc in enumerate(_w_cols_up):
+                            _col_vals = _df_b_up.iloc[1:, _i].dropna()
+                            _nums = [int(float(v)) for v in _col_vals
+                                     if str(v).replace(".", "").replace("-", "").isdigit()
+                                     and float(v) >= 1]
+                            if _nums:
+                                _b_data_up[_wc] = pd.Series(_nums)
+                        if _b_data_up:
+                            S["B"] = pd.DataFrame(_b_data_up)
+                            st.markdown(
+                                f'<div class="ok">✅ B loaded immediately: '
+                                f'{len(_b_data_up)} w-columns from sheet '
+                                f'<b>{_sheet_up}</b>.</div>',
+                                unsafe_allow_html=True)
+                            st.dataframe(S["B"], use_container_width=True, height=280)
+                        else:
+                            st.warning("File saved but no w-columns found. "
+                                       "Check sheet layout — row 0 must have w1, w2, …")
+                    else:
+                        st.warning(f"File saved but sheet '{_gcfg.get('b_sheet')}' not found. "
+                                   f"Available sheets: {xl_up.sheet_names}")
+                except Exception as _ex_up:
+                    st.error(f"Saved OK but could not parse: {_ex_up}")
 
     # ── TAB: R (Rainbow) ───────────────────────────────────────────────────
     with vtabs[1]:
@@ -3304,12 +3447,15 @@ elif page == "🧩 Variable Inputs":
 
         sl_file = _gdirs["SinceLast"] / "since_last.json"
         # Auto-fetch from lottolyzer if we don't have it cached yet.
+        # Use the overridden URL from the Since Last tab if the user changed it.
+        _r_sl_url = (st.session_state.get("sl_url_override")
+                     or _gcfg["lottolyzer"])
         if not sl_file.exists():
             with st.spinner(f"Fetching Since Last from lottolyzer for {_gcfg['label']}…"):
-                sl_dict_auto = fetch_since_last(_gcfg["lottolyzer"], _gcfg["pool"])
+                sl_dict_auto = fetch_since_last(_r_sl_url, _gcfg["pool"])
             if sl_dict_auto:
                 save_since_last(sl_dict_auto, _gkey, _gcfg["label"],
-                                _gcfg["pool"], _gcfg["lottolyzer"], sl_file)
+                                _gcfg["pool"], _r_sl_url, sl_file)
                 st.markdown(
                     f'<div class="ok">✅ Auto-fetched Since Last — '
                     f'{len(sl_dict_auto)} numbers from lottolyzer.</div>',
@@ -3378,17 +3524,120 @@ elif page == "🧩 Variable Inputs":
     # ── TAB: D (Direct) ────────────────────────────────────────────────────
     with vtabs[2]:
         st.markdown(f"**D — Syndicate data for {_gcfg['label']}**")
-        d_files = (sorted(_gdirs["Main_Data"].glob("D_*.csv")) +
-                   sorted(_gdirs["Direct"].glob("D*.csv")) +
-                   sorted(_gdirs["Direct"].glob("D*.xlsx")))
+        st.markdown(
+            '<div class="info">Load one state file <b>or</b> click '
+            '<b>Load ALL D files</b> to combine every state at once — '
+            'syndicates sorted longest pick → shortest automatically.</div>',
+            unsafe_allow_html=True)
+
+        # Gather all game-specific D files (national D_ALL first, then per-state)
+        d_files = (sorted(_gdirs["Games_Breakdown"].glob(f"D_ALL_{_gkey}.csv"))
+                   + sorted(p for p in _gdirs["Games_Breakdown"].glob("D_*.csv")
+                             if not p.name.startswith("D_ALL_"))
+                   + sorted(_gdirs["Main_Data"].glob("D_*.csv"))
+                   + sorted(_gdirs["Direct"].glob("D*.csv"))
+                   + sorted(_gdirs["Direct"].glob("D*.xlsx")))
+        # Deduplicate preserving order
+        _seen_fp, d_files_dedup = set(), []
+        for _f in d_files:
+            if _f not in _seen_fp:
+                _seen_fp.add(_f); d_files_dedup.append(_f)
+        d_files = d_files_dedup
+
         if d_files:
-            ch_d = st.selectbox("File:", [f.name for f in d_files], key="sel_d_file")
-            df_d = _load_file(d_files[[f.name for f in d_files].index(ch_d)])
-            S["D"] = df_d
-            st.write(f"{len(df_d):,} rows · {len(df_d.columns)} cols")
-            st.dataframe(df_d.head(40), use_container_width=True, height=300)
+            _d_labels = [f.name for f in d_files]
+            ch_d = st.selectbox("Select file to load (or use Load ALL below):",
+                                _d_labels, key="sel_d_file")
+
+            c_load1, c_loadall = st.columns(2)
+            with c_load1:
+                if st.button("▶ Load selected file", key="btn_d_load_one",
+                             use_container_width=True):
+                    _fp = d_files[_d_labels.index(ch_d)]
+                    with st.spinner(f"Loading {_fp.name}…"):
+                        df_d = _load_file(_fp)
+                        if not df_d.empty:
+                            df_d = sort_d_longest_first(df_d)
+                    S["D"] = df_d
+                    st.success(f"✅ Loaded {len(df_d):,} rows from {_fp.name} "
+                               f"(sorted longest → shortest)")
+
+            with c_loadall:
+                if st.button(
+                    f"📦 Load ALL D files ({len(d_files)} files, all states combined)",
+                    key="btn_d_load_all", type="primary", use_container_width=True,
+                ):
+                    dfs_all = []
+                    _prog_d = st.progress(0, text="Loading D files…")
+                    for _fi, _fp in enumerate(d_files):
+                        _prog_d.progress((_fi + 1) / len(d_files),
+                                         text=f"Loading {_fp.name}…")
+                        try:
+                            _tmp = _load_file(_fp)
+                            if not _tmp.empty:
+                                dfs_all.append(_tmp)
+                        except Exception as _ex:
+                            st.warning(f"Skipped {_fp.name}: {_ex}")
+                    _prog_d.empty()
+                    if dfs_all:
+                        df_d_all = pd.concat(dfs_all, ignore_index=True)
+                        df_d_all = sort_d_longest_first(df_d_all)
+                        S["D"] = df_d_all
+                        st.success(f"✅ Combined {len(dfs_all)} file(s) → "
+                                   f"**{len(df_d_all):,} rows** · {len(df_d_all.columns)} cols "
+                                   f"(sorted longest → shortest)")
+                    else:
+                        st.error("No D files could be loaded.")
+
+            # ── Display whatever is now in S["D"] ─────────────────────────
+            df_d = S.get("D", pd.DataFrame())
+            if not df_d.empty:
+                # ── Current draw vs future draws ───────────────────────────
+                if "Draw_Date" in df_d.columns:
+                    st.markdown("---")
+                    try:
+                        _dd_all = pd.to_datetime(df_d["Draw_Date"], errors="coerce")
+                        _future_dates_sorted = sorted(_dd_all.dropna().unique())
+                        if _future_dates_sorted:
+                            _current_draw_dt = _future_dates_sorted[0]
+                            _n_cur = int((_dd_all == _current_draw_dt).sum())
+                            _n_fut = int((_dd_all > _current_draw_dt).sum())
+                            _dm1, _dm2 = st.columns(2)
+                            _dm1.metric(
+                                "📅 Current draw syndicates", f"{_n_cur:,}",
+                                help=f"Draw date: {str(_current_draw_dt.date())}")
+                            _dm2.metric(
+                                "🔮 Future draw syndicates", f"{_n_fut:,}",
+                                help=f"{len(_future_dates_sorted)-1} future date(s) beyond current draw")
+
+                            _date_opts = (["All draws"]
+                                          + [str(d.date()) for d in _future_dates_sorted[:12]])
+                            _draw_filter = st.radio(
+                                "🗓️ Filter view by draw date:",
+                                _date_opts,
+                                horizontal=True,
+                                key="d_draw_filter"
+                            )
+                            if _draw_filter != "All draws":
+                                _sel_dt = pd.Timestamp(_draw_filter)
+                                _mask = _dd_all.dt.normalize() == _sel_dt.normalize()
+                                df_d = df_d[_mask]
+                                st.info(f"Showing {len(df_d):,} rows for draw {_draw_filter}")
+                    except Exception:
+                        pass
+
+                st.write(f"**{len(df_d):,} rows · {len(df_d.columns)} cols**")
+                st.dataframe(df_d.head(40), use_container_width=True, height=300)
+                st.download_button(
+                    f"⬇ Download D (current view) as CSV — {len(df_d):,} rows",
+                    to_csv_bytes(df_d),
+                    f"D_{_gkey}_export.csv",
+                    "text/csv",
+                    key="dl_d_tab"
+                )
         else:
-            st.info(f"No D files in Games/{_gkey.upper()}/. Run the Scraper and split by game.")
+            st.info(f"No D files in Games/{_gkey.upper()}/. Run the Scraper page "
+                    f"→ Promote All + Split by Game.")
 
     # ── TAB: Ep (ExcelPro) ─────────────────────────────────────────────────
     with vtabs[3]:
@@ -3720,8 +3969,18 @@ elif page == "🧩 Variable Inputs":
     # ── TAB: Since Last ────────────────────────────────────────────────────
     with vtabs[6]:
         st.markdown(f"**Since Last — fetch from lottolyzer for {_gcfg['label']}**")
-        sl_url = _gcfg["lottolyzer"]
-        st.markdown(f"Source: [{sl_url}]({sl_url})")
+        _default_sl_url = _gcfg["lottolyzer"]
+        st.markdown(
+            '<div class="note">⚠️ If the link below opens the wrong game on lottolyzer '
+            '(e.g. shows Set for Life instead of Saturday Lotto), paste the correct URL '
+            'in the field below and click <b>Fetch now</b>.</div>',
+            unsafe_allow_html=True)
+        sl_url = st.text_input(
+            "Lottolyzer URL (editable — fix if it points to the wrong game):",
+            value=_default_sl_url,
+            key="sl_url_override"
+        )
+        st.markdown(f"→ [Open this link in browser]({sl_url})")
 
         sl_file = _gdirs["SinceLast"] / "since_last.json"
 
