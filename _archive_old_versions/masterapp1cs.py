@@ -83,33 +83,242 @@ if not _config_path.exists():
         "fastReruns = true\n"
     )
 
+# ── Global-only DIRS (shared across all games) ───────────────────────────────
+# Game-specific paths (Main_Data, Formulas, Containers, Outputs, Variables, CVI,
+# Selected_Counts, Base, Splits, etc.) are accessed via game_dirs() / active_game_dirs()
+# so they are always scoped to the correct game and suffixed with _{game}.
+# Only truly shared paths live here.
 DIRS = {
-    # ── Top-level ──────────────────────────────────────────────────────────
-    "Main_Data":    ROOT / "Main_Data",          # ONLY the user's own draw data (n-cols)
-    "Global_Scraper": ROOT / "Global_Scraper",   # RAW unprocessed scrapes: D_<STATE>.csv
-    "Outputs":      ROOT / "Outputs",            # final matched outputs
-    "Formulas":     ROOT / "Formulas",           # Container Formula.xlsx lives here
-    "Containers":   ROOT / "Containers",
-    # ── Scraper pipeline ───────────────────────────────────────────────────
-    # Step 1: raw scraper output lands here first
-    "Scraper":      ROOT / "Variables" / "Scraper",
-    # Step 2: after processing, moved here (the D variable)
-    "Direct":       ROOT / "Variables" / "Variable_Elements" / "Direct",
-    # ── Variable Elements ──────────────────────────────────────────────────
-    "Base":         ROOT / "Variables" / "Variable_Elements" / "Base",
-    "Splits":       ROOT / "Variables" / "Variable_Elements" / "Splits",
-    "Splits_Combi": ROOT / "Variables" / "Variable_Elements" / "Splits_Combi",
-    "Rainbow":      ROOT / "Variables" / "Variable_Elements" / "Rainbow",
-    "ExcelPro":     ROOT / "Variables" / "Variable_Elements" / "ExcelPro",
-    # ── CVI: collated outputs land here, dashboards load from here ─────────
-    "CVI":          ROOT / "Variables" / "Container_Variable_Inputs",
-    # ── Selected Counts: one file per formula row ──────────────────────────
-    "Selected_Counts": ROOT / "Formulas" / "Selected_Counts",
-    # ── Debug ─────────────────────────────────────────────────────────────
-    "debug_html":   ROOT / "debug_html",
+    "Global_Scraper": ROOT / "Global_Scraper",  # raw scrapes: D_<STATE>.csv (all games)
+    "debug_html":     ROOT / "debug_html",       # debug output
 }
 for d in DIRS.values():
     d.mkdir(parents=True, exist_ok=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STARTUP MIGRATION — runs once per session to enforce the folder convention.
+#
+# Problem: old code created root-level folders (Containers, Formulas, Main_Data,
+# Variables, Outputs) and game subfolders without the _{game} suffix. Every time
+# the app started those folders were re-created by the old DIRS mkdir loop.
+#
+# Fix embedded here so no separate script is needed:
+#   1. Remove stale root-level duplicate folders (only if empty — no data lost).
+#   2. Rename game subfolders to the _{game} suffix convention.
+#   3. Flatten old Variables/ tree → variable_inputs_{game}/ and
+#      container_variable_inputs_{game}/.
+# ═══════════════════════════════════════════════════════════════════════════════
+import shutil as _shutil
+
+_ROOT_LEVEL_STALE = [
+    "Containers", "Formulas", "Main_Data", "Variables", "Outputs",
+]
+
+_SUBFOLDER_CANON = {
+    "containers":                "containers",
+    "container":                 "containers",
+    "formulas":                  "formulas",
+    "formula":                   "formulas",
+    "main_data":                 "main_data",
+    "maindata":                  "main_data",
+    "outputs":                   "outputs",
+    "output":                    "outputs",
+    "sincelast":                 "sincelast",
+    "since_last":                "sincelast",
+    "games_breakdown":           "games_breakdown",
+    "gamesbreakdown":            "games_breakdown",
+    "cvi_matrix":                "container_variable_inputs",
+    "cvimatrix":                 "container_variable_inputs",
+    "container_variable_inputs": "container_variable_inputs",
+    "containervariableinputs":   "container_variable_inputs",
+    "variable_inputs":           "variable_inputs",
+    "variableinputs":            "variable_inputs",
+}
+
+
+def _norm(name: str) -> str:
+    return name.lower().replace(" ", "_").replace("-", "_")
+
+
+def _startup_migrate(root: Path):
+    """Idempotent startup migration — safe to run every launch."""
+
+    # ── Step 1: remove stale empty root-level folders ──────────────────────
+    for name in _ROOT_LEVEL_STALE:
+        p = root / name
+        if p.is_dir():
+            contents = [x for x in p.iterdir() if not x.name.startswith(".")]
+            if not contents:
+                try:
+                    _shutil.rmtree(str(p))
+                except Exception:
+                    pass
+            # Non-empty root-level folders are handled in steps 4 & 5 below
+
+    games_dir = root / "Games"
+    if not games_dir.is_dir():
+        return
+
+    for game in ["SAT", "OZ", "PB", "MWF", "SFL"]:
+        gp = games_dir / game
+        if not gp.is_dir():
+            continue
+        gk = game.lower()
+        suffix = f"_{gk}"
+
+        # ── Step 2: rename top-level game subfolders ────────────────────────
+        for entry in sorted(gp.iterdir()):
+            if not entry.is_dir():
+                continue
+            key = _norm(entry.name)
+            if key == "variables":
+                continue  # handled in step 3
+            # strip existing suffix before lookup
+            if key.endswith(suffix):
+                key = key[: -len(suffix)]
+            canonical = _SUBFOLDER_CANON.get(key)
+            if canonical is None:
+                continue
+            desired = gp / f"{canonical}{suffix}"
+            if entry != desired and not desired.exists():
+                try:
+                    entry.rename(desired)
+                except Exception:
+                    pass
+
+        # ── Step 3: flatten old Variables/ tree ────────────────────────────
+        old_vars = gp / "Variables"
+        if not old_vars.is_dir():
+            continue
+
+        var_inputs_dst = gp / f"variable_inputs_{gk}"
+        cvi_dst        = gp / f"container_variable_inputs_{gk}"
+
+        # Variables/Scraper → variable_inputs_{gk}/Scraper
+        src = old_vars / "Scraper"
+        dst = var_inputs_dst / "Scraper"
+        if src.is_dir() and not dst.exists():
+            var_inputs_dst.mkdir(parents=True, exist_ok=True)
+            try:
+                src.rename(dst)
+            except Exception:
+                pass
+
+        # Variables/Variable_Elements/* → variable_inputs_{gk}/ (flatten)
+        var_elem = old_vars / "Variable_Elements"
+        if var_elem.is_dir():
+            var_inputs_dst.mkdir(parents=True, exist_ok=True)
+            for item in sorted(var_elem.iterdir()):
+                dst_item = var_inputs_dst / item.name
+                if not dst_item.exists():
+                    try:
+                        item.rename(dst_item)
+                    except Exception:
+                        pass
+            # Remove shell if now empty
+            remaining = [x for x in var_elem.iterdir()
+                         if not x.name.startswith(".")]
+            if not remaining:
+                try:
+                    var_elem.rmdir()
+                except Exception:
+                    pass
+
+        # Variables/Container_Variable_Inputs → container_variable_inputs_{gk}
+        src_cvi = old_vars / "Container_Variable_Inputs"
+        if src_cvi.is_dir() and not cvi_dst.exists():
+            try:
+                src_cvi.rename(cvi_dst)
+            except Exception:
+                pass
+
+        # Remove empty Variables/ shell
+        remaining = [x for x in old_vars.iterdir()
+                     if not x.name.startswith(".")]
+        if not remaining:
+            try:
+                old_vars.rmdir()
+            except Exception:
+                pass
+
+    # ── Step 4: flatten root-level Variables/ → Games/SAT/variable_inputs_sat/
+    #    (old global Variables/ before game-specific structure was introduced)
+    root_vars = root / "Variables"
+    if root_vars.is_dir():
+        sat_path = root / "Games" / "SAT"
+        if sat_path.is_dir():
+            vi_dst  = sat_path / "variable_inputs_sat"
+            cvi_dst2 = sat_path / "container_variable_inputs_sat"
+
+            src_sc = root_vars / "Scraper"
+            dst_sc = vi_dst / "Scraper"
+            if src_sc.is_dir() and not dst_sc.exists():
+                vi_dst.mkdir(parents=True, exist_ok=True)
+                try:
+                    src_sc.rename(dst_sc)
+                except Exception:
+                    pass
+
+            ve_dir = root_vars / "Variable_Elements"
+            if ve_dir.is_dir():
+                vi_dst.mkdir(parents=True, exist_ok=True)
+                for item in sorted(ve_dir.iterdir()):
+                    if item.name.startswith("."):
+                        continue
+                    dst_item = vi_dst / item.name
+                    if not dst_item.exists():
+                        try:
+                            item.rename(dst_item)
+                        except Exception:
+                            pass
+                rem = [x for x in ve_dir.iterdir() if not x.name.startswith(".")]
+                if not rem:
+                    try:
+                        ve_dir.rmdir()
+                    except Exception:
+                        pass
+
+            src_cvi2 = root_vars / "Container_Variable_Inputs"
+            if src_cvi2.is_dir() and not cvi_dst2.exists():
+                try:
+                    src_cvi2.rename(cvi_dst2)
+                except Exception:
+                    pass
+
+            rem_rv = [x for x in root_vars.iterdir() if not x.name.startswith(".")]
+            if not rem_rv:
+                try:
+                    root_vars.rmdir()
+                except Exception:
+                    pass
+
+    # ── Step 5: move root-level Formulas/ → Games/SAT/formulas_sat/
+    #    (old global Formulas/ before game-specific structure)
+    root_formulas = root / "Formulas"
+    if root_formulas.is_dir():
+        sat_path = root / "Games" / "SAT"
+        if sat_path.is_dir():
+            sat_formulas_dst = sat_path / "formulas_sat"
+            sat_formulas_dst.mkdir(parents=True, exist_ok=True)
+            for item in sorted(root_formulas.iterdir()):
+                if item.name.startswith("."):
+                    continue
+                dst_item = sat_formulas_dst / item.name
+                if not dst_item.exists():
+                    try:
+                        item.rename(dst_item)
+                    except Exception:
+                        pass
+            rem_rf = [x for x in root_formulas.iterdir() if not x.name.startswith(".")]
+            if not rem_rf:
+                try:
+                    root_formulas.rmdir()
+                except Exception:
+                    pass
+
+
+_startup_migrate(ROOT)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. CONSTANTS
@@ -381,26 +590,37 @@ def combine_states_for_game(game_key: str) -> dict:
 
 
 def game_dirs(game_key: str) -> dict:
-    """Return DIRS-like dict scoped to a specific game folder."""
-    g = ROOT / "Games" / game_key.upper()
-    gb = g / "Games_Breakdown"      # per-game split D lives here (findable, matches tab)
+    """Return DIRS-like dict scoped to a specific game folder.
+
+    All top-level subfolders are suffixed with _{game_key} so each game's
+    folders are visually distinct and never confused with another game's data.
+    e.g. Games/SAT/main_data_sat/, Games/OZ/formulas_oz/, etc.
+    """
+    g  = ROOT / "Games" / game_key.upper()
+    gk = game_key.lower()
+
+    # Named intermediate paths used by multiple sub-entries
+    var_inputs = g / f"variable_inputs_{gk}"   # was Variables/Variable_Elements
+    gb         = g / f"games_breakdown_{gk}"   # per-game split D lives here
+    formulas   = g / f"formulas_{gk}"
+
     d = {
         "Game":            g,
-        "Main_Data":       g / "Main_Data",
-        "Outputs":         g / "Outputs",
-        "Formulas":        g / "Formulas",
-        "Containers":      g / "Containers",
-        "Scraper":         g / "Variables" / "Scraper",
+        "Main_Data":       g / f"main_data_{gk}",
+        "Outputs":         g / f"outputs_{gk}",
+        "Formulas":        formulas,
+        "Containers":      g / f"containers_{gk}",
+        "Scraper":         var_inputs / "Scraper",
         "Games_Breakdown": gb,
         "Direct":          gb,      # alias (legacy key) → same Games_Breakdown folder
-        "Base":            g / "Variables" / "Variable_Elements" / "Base",
-        "Splits":          g / "Variables" / "Variable_Elements" / "Splits",
-        "Splits_Combi":    g / "Variables" / "Variable_Elements" / "Splits_Combi",
-        "Rainbow":         g / "Variables" / "Variable_Elements" / "Rainbow",
-        "ExcelPro":        g / "Variables" / "Variable_Elements" / "ExcelPro",
-        "CVI":             g / "Variables" / "Container_Variable_Inputs",
-        "Selected_Counts": g / "Formulas" / "Selected_Counts",
-        "SinceLast":       g / "SinceLast",
+        "Base":            var_inputs / "Base",
+        "Splits":          var_inputs / "Splits",
+        "Splits_Combi":    var_inputs / "Splits_Combi",
+        "Rainbow":         var_inputs / "Rainbow",
+        "ExcelPro":        var_inputs / "ExcelPro",
+        "CVI":             g / f"container_variable_inputs_{gk}",
+        "Selected_Counts": formulas / "Selected_Counts",
+        "SinceLast":       g / f"sincelast_{gk}",
     }
     for p in d.values():
         p.mkdir(parents=True, exist_ok=True)
@@ -454,14 +674,14 @@ def parse_cvi_filename(fname: str) -> dict:
 
 def scan_main_data_files() -> list[dict]:
     """
-    Scan Main_Data/ and return only files matching the naming convention:
-    {cluster}_{lotto_type}_D{draw_no}.csv
+    Scan the active game's main_data_{game}/ folder and return only files
+    matching the naming convention: {cluster}_{lotto_type}_D{draw_no}.csv
     e.g. 1n_oz_D1567.csv
     Rejects CVI files, SC files, or any file without a draw number (_D prefix).
     """
     lotto_codes = set(LOTTO_TYPES.keys())
     files = []
-    for fp in sorted(DIRS["Main_Data"].glob("*.csv")):
+    for fp in sorted(active_game_dirs()["Main_Data"].glob("*.csv")):
         name = fp.stem   # without .csv
         parts = name.split("_")
 
@@ -471,11 +691,7 @@ def scan_main_data_files() -> list[dict]:
 
         # Reject files that start with known non-main-data prefixes
         if parts[0] in ("CVI", "SC", "CF", "Container", "D", "MAIN"):
-            # Allow MAIN_ prefix (old style) but check further
-            if parts[0] == "MAIN":
-                pass
-            else:
-                continue
+            continue
 
         # Must contain a lotto type code
         lotto_found = next((p for p in parts if p in lotto_codes), None)
@@ -510,9 +726,9 @@ def scan_main_data_files() -> list[dict]:
 
 
 def scan_cvi_files(lotto_type: str = "") -> list[dict]:
-    """Scan Container_Variable_Inputs/ for CVI files."""
+    """Scan the active game's container_variable_inputs_{game}/ for CVI files."""
     files = []
-    for fp in sorted(DIRS["CVI"].glob("CVI_*.csv")):
+    for fp in sorted(active_game_dirs()["CVI"].glob("CVI_*.csv")):
         info = parse_cvi_filename(fp.name)
         if not lotto_type or info["lotto"] == lotto_type:
             info["path"] = str(fp)
@@ -697,16 +913,74 @@ def _parallel_worker(args: tuple) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3. SESSION STATE — single shared dict S
 # ═══════════════════════════════════════════════════════════════════════════════
+def _auto_load_b(game_key: str = "sat") -> pd.DataFrame:
+    """Try to auto-load the Base file for game_key from the project folder tree.
+
+    Search order:
+      1. Game-specific file under ROOT/Games/<GAME>/…/Base_<game>.xlsx
+      2. Anywhere under ROOT matching Base_<game>.xlsx
+      3. Shared Base.xlsx anywhere under ROOT
+      4. Legacy f_rules_Gclaude.xlsx anywhere under ROOT
+    Returns a DataFrame of w-columns (column-oriented), or empty DataFrame.
+    """
+    gcfg = GAMES_CFG.get(game_key, {})
+    b_file = gcfg.get("b_file", f"Base_{game_key}.xlsx")
+    b_sheet = gcfg.get("b_sheet", f"B_{game_key}")
+    b_sheet_legacy = gcfg.get("b_sheet_legacy", "")
+
+    candidates = (list(ROOT.rglob(b_file))
+                  or list(ROOT.rglob("Base.xlsx"))
+                  or list(ROOT.rglob("f_rules_Gclaude.xlsx")))
+    if not candidates:
+        return pd.DataFrame()
+
+    for path in candidates:
+        try:
+            xl = pd.ExcelFile(path, engine="openpyxl")
+            sheet = None
+            for cand in (b_sheet, game_key.upper(), b_sheet_legacy):
+                if cand and cand in xl.sheet_names:
+                    sheet = cand
+                    break
+            if sheet is None and len(xl.sheet_names) == 1:
+                sheet = xl.sheet_names[0]
+            if sheet is None:
+                continue
+            raw = xl.parse(sheet, header=None)
+            w_cols = [str(raw.iloc[0, c]) for c in range(raw.shape[1])
+                      if str(raw.iloc[0, c]).startswith("w")]
+            b_data = {}
+            for i, wc in enumerate(w_cols):
+                col_vals = raw.iloc[1:, i].dropna()
+                nums = [int(float(v)) for v in col_vals
+                        if str(v).replace(".", "").replace("-", "").isdigit()
+                        and float(v) >= 1]
+                if nums:
+                    b_data[wc] = pd.Series(nums)
+            if b_data:
+                return pd.DataFrame(b_data)
+        except Exception:
+            continue
+    return pd.DataFrame()
+
+
 def _init_state():
     if "S" in st.session_state:
         return
+    # Auto-load B for the default game (sat) at startup.
+    # The active game can change via the game selector; B will reload in the B tab.
+    _b_init = _auto_load_b("sat")
+    _sat_dirs = game_dirs("sat")
+    if _b_init.empty:
+        _b_init = _load_file(_sat_dirs["Base"] / "B.xlsx")   # legacy fallback
+
     st.session_state.S = {
         # Variable DataFrames
-        "B":   _load_file(DIRS["Base"]         / "B.xlsx"),
-        "R":   pd.DataFrame({"w": range(1,9), "w1":[49,22,2,13,35,27,6,12]}),
-        "D":   _load_file(DIRS["Direct"]       / "D.xlsx"),
-        "Sp":  _load_file(DIRS["Splits"]       / "data_1b.xlsx"),
-        "So":  _load_file(DIRS["Splits_Combi"] / "data.xlsx"),
+        "B":   _b_init,
+        "R":   pd.DataFrame(),
+        "D":   _load_file(_sat_dirs["Direct"]       / "D.xlsx"),
+        "Sp":  _load_file(_sat_dirs["Splits"]       / "data_1b.xlsx"),
+        "So":  _load_file(_sat_dirs["Splits_Combi"] / "data.xlsx"),
         # Main Data (user uploads manually each run)
         "main_data": pd.DataFrame(),
         # Collated CVI results per formula
@@ -873,6 +1147,12 @@ def to_styled_excel(df: pd.DataFrame, cvi_set: set,
         top=Side(style="thin"),  bottom=Side(style="thin")
     )
 
+    EXCEL_ROW_LIMIT = 1_048_575  # Excel max rows minus header
+    truncated = False
+    if len(df) > EXCEL_ROW_LIMIT:
+        df = df.iloc[:EXCEL_ROW_LIMIT].copy()
+        truncated = True
+
     wb = Workbook()
     ws = wb.active
     ws.title = sheet_name[:31]
@@ -887,8 +1167,17 @@ def to_styled_excel(df: pd.DataFrame, cvi_set: set,
         cell.border = thin
         ws.column_dimensions[cell.column_letter].width = 8
 
-    # Data rows
-    for ri, (_, row) in enumerate(df.iterrows(), 2):
+    if truncated:
+        # Write a notice row beneath the header
+        ws.insert_rows(2)
+        notice_cell = ws.cell(row=2, column=1,
+                              value=f"⚠ Truncated to {EXCEL_ROW_LIMIT:,} rows "
+                                    f"(Excel limit). Full data available as CSV.")
+        notice_cell.font = Font(bold=True, color="FF0000")
+
+    # Data rows (start at row 3 if truncated notice inserted, else row 2)
+    row_offset = 3 if truncated else 2
+    for ri, (_, row) in enumerate(df.iterrows(), row_offset):
         for ci, col in enumerate(cols, 1):
             val = row[col]
             cell = ws.cell(row=ri, column=ci,
@@ -1411,12 +1700,16 @@ def sort_d_longest_first(D: pd.DataFrame) -> pd.DataFrame:
 def prepare_d_input_sets(D: pd.DataFrame, n: int) -> pd.DataFrame:
     """Peel off the N LONGEST entries of D as the generator input columns.
 
-    Per the pipeline brief: the longest D rows become the a, b, c, d (… h) input
+    Per the pipeline brief: the longest D rows become the w1, w2, w3, w4 (… w8) input
     SETS for the generators — Sp/So take the first 4 longest, Ep takes the first 8.
     Each chosen entry (a row of numbers in D) is laid DOWN one column, so the result
-    is a DataFrame whose columns are a, b, c, … each holding one long entry's numbers.
+    is a DataFrame whose columns are w1, w2, w3, w4, … each holding one long entry's
+    numbers.
 
-    Example: D's three System-20 rows + one System-19 row (3+1=4) → columns a,b,c,d.
+    Example: D's three System-20 rows + one System-19 row (3+1=4) → columns w1,w2,w3,w4.
+    Note: In ALL D, each syndicate IS a row labeled w1,w2… (number positions across).
+    Here we peel those rows into COLUMNS w1,w2,w3,w4 (one syndicate per column) so the
+    generators can work with them as independent sets.
     """
     if D is None or D.empty or n < 1:
         return pd.DataFrame()
@@ -1425,7 +1718,7 @@ def prepare_d_input_sets(D: pd.DataFrame, n: int) -> pd.DataFrame:
         return pd.DataFrame()
     ordered = sort_d_longest_first(D)
     top = ordered[wcols].head(n)
-    labels = [chr(ord("a") + i) for i in range(n)]  # a, b, c, d, …
+    labels = [f"w{i+1}" for i in range(n)]  # w1, w2, w3, w4, …
     cols = {}
     for label, (_, row) in zip(labels, top.iterrows()):
         nums = [int(x) for x in row.dropna()]
@@ -1449,7 +1742,7 @@ def auto_half_splits(sets_dict: dict) -> list:
 
 
 def _d_input_to_sets(d_input_df: pd.DataFrame) -> dict:
-    """Columns a,b,c,d… (each a long D entry down the rows) → {label: [numbers]}."""
+    """Columns w1,w2,w3,w4… (each a long D entry down the rows) → {label: [numbers]}."""
     out = {}
     for col in d_input_df.columns:
         out[str(col)] = [int(x) for x in d_input_df[col].dropna().tolist()]
@@ -1545,7 +1838,7 @@ def generate_rainbow(sl_df: pd.DataFrame, max_comb=None, combo_guard: int = 200_
 
 # ── Sp : Splits (ported from task1b.py) ──────────────────────────────────────
 def generate_splits(d_input_df: pd.DataFrame, splitter=None) -> pd.DataFrame:
-    """Sp from D's 4 longest rows (columns a,b,c,d). Auto half-splits unless given."""
+    """Sp from D's 4 longest rows (columns w1,w2,w3,w4). Auto half-splits unless given."""
     from itertools import combinations
     sets_ready = _d_input_to_sets(d_input_df)
     keys = list(sets_ready.keys())
@@ -1590,9 +1883,13 @@ def generate_splits(d_input_df: pd.DataFrame, splitter=None) -> pd.DataFrame:
 
 # ── So : Splits-combi (ported from automation_vba.py, len==4 branch) ─────────
 def generate_splits_combi(d_input_df: pd.DataFrame, splitter=None) -> pd.DataFrame:
-    """So from D's 4 longest rows (columns a,b,c,d). Auto half-splits unless given.
+    """So from D's 4 longest rows (columns w1,w2,w3,w4). Auto half-splits unless given.
     Ports the set algebra of automation_vba.sets_sampling; skips the cosmetic
-    column-relabeling (not needed for the pipeline variable)."""
+    column-relabeling (not needed for the pipeline variable).
+
+    Key naming: split keys are base_key + "0"/"1" (e.g. 'w10','w11' for base 'w1').
+    Membership check strips the trailing suffix char to recover the base key.
+    """
     from itertools import combinations
     sets_ready = _d_input_to_sets(d_input_df)
     keys = list(sets_ready.keys())
@@ -1610,8 +1907,11 @@ def generate_splits_combi(d_input_df: pd.DataFrame, splitter=None) -> pd.DataFra
                   for t in combinations(keys, 3)}
     for ti, tset in comb_three.items():
         for pj, pset in comb_pairs.items():
-            # original: pair ⊆ triple AND both pair-letters appear in the triple
-            if pset.issubset(tset) and pj[0][0] in ti and pj[1][0] in ti:
+            # Strip trailing "0"/"1" suffix to get the base key, then check membership
+            # in the triple. Works for any key length (w1, w2, ... or a, b, ...).
+            base0 = pj[0][:-1]  # e.g. 'w10' → 'w1', 'a0' → 'a'
+            base1 = pj[1][:-1]  # e.g. 'w21' → 'w2', 'b1' → 'b'
+            if pset.issubset(tset) and base0 in ti and base1 in ti:
                 result["U-" + str(ti) + "-" + str(pj)] = universe - (tset - pset)
                 result[str(ti) + "-" + str(pj)] = tset - pset
         result[str(ti)] = tset
@@ -1623,42 +1923,62 @@ def generate_splits_combi(d_input_df: pd.DataFrame, splitter=None) -> pd.DataFra
 
 # ── Ep : ExcelPro (ported from Java Main.java — the substantive 'All' output) ─
 def prepare_ep_objects(D: pd.DataFrame, mode: str = "pairs") -> dict:
-    """Build the 4 ExcelPro objects a,b,c,d — each = (arrayOne, arrayTwo) — from D.
+    """Build the 4 ExcelPro objects a, b, c, d — each = (arrayOne, arrayTwo) — from D.
 
-    mode='pairs' (default, confirmed): the 8 LONGEST entries paired up
-      (a=#1&#2, b=#3&#4, c=#5&#6, d=#7&#8) — eight distinct longest rows of D, two
-      per object. Ep's to_keep/wt list is supplied by R (rainbow).
-    mode='halves': the 4 LONGEST entries, each split in half (arrayOne=first half,
+    mode='pairs' (default): the 8 LONGEST D rows paired into 4 objects:
+      a = (D-row#1, D-row#2)  →  i.e. the w1 and w2 longest rows
+      b = (D-row#3, D-row#4)  →  w3, w4
+      c = (D-row#5, D-row#6)  →  w5, w6
+      d = (D-row#7, D-row#8)  →  w7, w8
+    Each pair's first member becomes arrayOne, second becomes arrayTwo.
+    Ep's wt filter list is supplied by R (rainbow).
+
+    mode='halves': the 4 LONGEST D rows, each split in half (arrayOne=first half,
       arrayTwo=second half) — kept as an alternative.
     """
     if mode == "pairs":
-        inp = prepare_d_input_sets(D, 8)
+        inp = prepare_d_input_sets(D, 8)   # columns: w1, w2, … w8 (8 longest rows)
         cols = list(inp.columns)
         objects = {}
         for i, lab in enumerate(["a", "b", "c", "d"]):
+            # pair i: cols[2i] = arrayOne (e.g. w1), cols[2i+1] = arrayTwo (e.g. w2)
             one = [int(x) for x in inp[cols[2 * i]].dropna()] if 2 * i < len(cols) else []
             two = [int(x) for x in inp[cols[2 * i + 1]].dropna()] if 2 * i + 1 < len(cols) else []
             objects[lab] = (one, two)
         return objects
-    inp = prepare_d_input_sets(D, 4)
+    # mode='halves'
+    inp = prepare_d_input_sets(D, 4)       # columns: w1, w2, w3, w4 (4 longest rows)
     objects = {}
-    for col in inp.columns:
+    for lab, col in zip(["a", "b", "c", "d"], inp.columns):
         nums = [int(x) for x in inp[col].dropna()]
         half = (len(nums) + 1) // 2
-        objects[str(col)] = (nums[:half], nums[half:])
+        objects[lab] = (nums[:half], nums[half:])
     return objects
 
 
 def generate_excelpro(objects: dict, wt_list) -> pd.DataFrame:
-    """Ep — the ExcelPro 'All' result. For each pair header (ab,ac,ad,bc,bd,cd) and
-    pair (x,y), emit 4 columns: R's wt numbers landing in x.arrayOne, x.arrayTwo,
-    y.arrayOne, y.arrayTwo. (Faithful to Main.java comboList → 'All'; POI cosmetics
-    dropped — collation only needs the number sets.)"""
-    headers = ["ab", "ac", "ad", "bc", "bd", "cd"]
+    """Ep — the ExcelPro 'All' result (faithful to Main.java comboList → 'All').
+
+    For each pair (x, y) of the 4 objects a, b, c, d, emit 4 columns:
+      a_<xy>  — wt numbers found in x.arrayOne
+      b_<xy>  — wt numbers found in x.arrayTwo
+      c_<xy>  — wt numbers found in y.arrayOne
+      d_<xy>  — wt numbers found in y.arrayTwo
+
+    Column naming uses the concatenated object labels (single chars), so pairs produce:
+      a_ab, b_ab, c_ab, d_ab,
+      a_ac, b_ac, c_ac, d_ac,
+      a_ad, b_ad, c_ad, d_ad,
+      a_bc, b_bc, c_bc, d_bc,
+      a_bd, b_bd, c_bd, d_bd,
+      a_cd, b_cd, c_cd, d_cd
+    """
+    from itertools import combinations as _ep_combos
+    keys = list(objects.keys())   # ['a', 'b', 'c', 'd']
     wt = [int(w) for w in wt_list]
     result = {}
-    for h in headers:
-        x, y = h[0], h[1]
+    for x, y in _ep_combos(keys, 2):
+        h = x + y                 # e.g. 'ab', 'ac', 'ad', 'bc', 'bd', 'cd'
         xo, xt = set(objects[x][0]), set(objects[x][1])
         yo, yt = set(objects[y][0]), set(objects[y][1])
         result["a_" + h] = [w for w in wt if w in xo]
@@ -1704,6 +2024,103 @@ def _to_w_rows(df: pd.DataFrame, is_direct: bool = False) -> pd.DataFrame:
     return out
 
 
+def _sets_df_to_rows(df: pd.DataFrame, set_col: str = "set") -> pd.DataFrame:
+    """Transpose a column-oriented set DataFrame to row-oriented for display/export.
+
+    Input:  columns = set names (e.g. 'ab', 'U', 'w10', 'a_ab'),
+            rows    = values padded with NaN to equal length.
+    Output: one row per set; first column = set_col (the set label);
+            remaining columns = pos_1, pos_2, … (the actual numbers).
+    Empty/all-NaN value columns are dropped.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+    t = df.T.reset_index()
+    t.columns = [set_col] + [f"pos_{i+1}" for i in range(t.shape[1] - 1)]
+    # Drop value columns that are entirely NaN
+    val_cols = [c for c in t.columns if c != set_col]
+    t = t.dropna(subset=val_cols, how="all")
+    # Drop trailing all-NaN position columns
+    non_empty_val = [c for c in val_cols if t[c].notna().any()]
+    t = t[[set_col] + non_empty_val].reset_index(drop=True)
+    return t
+
+
+# ── Universal file reader ──────────────────────────────────────────────────
+_UPLOAD_TYPES = [
+    "csv", "txt", "tsv",
+    "xlsx", "xls", "xlsb", "xlsm", "ods",
+    "html", "htm",
+    "json", "xml",
+    "accdb", "mdb",
+]
+
+def _read_uploaded(f, **kw) -> "pd.DataFrame":
+    """Read any Streamlit UploadedFile into a DataFrame regardless of extension.
+
+    Supports: CSV/TSV/TXT, Excel (xlsx/xls/xlsb/xlsm/ods),
+              HTML tables, JSON, XML, and Access (accdb/mdb via mdbtools).
+    Extra kwargs are forwarded to the underlying pandas reader.
+    """
+    import io as _io
+    name = f.name.lower()
+    raw = f.getvalue()
+
+    if name.endswith((".xlsx", ".xlsm", ".xlsb")):
+        return pd.read_excel(_io.BytesIO(raw), engine="openpyxl", **kw)
+    if name.endswith(".xls"):
+        try:
+            return pd.read_excel(_io.BytesIO(raw), engine="xlrd", **kw)
+        except Exception:
+            return pd.read_excel(_io.BytesIO(raw), engine="openpyxl", **kw)
+    if name.endswith(".ods"):
+        return pd.read_excel(_io.BytesIO(raw), engine="odf", **kw)
+    if name.endswith((".html", ".htm")):
+        tables = pd.read_html(_io.BytesIO(raw), **kw)
+        return tables[0] if tables else pd.DataFrame()
+    if name.endswith(".json"):
+        return pd.read_json(_io.BytesIO(raw), **kw)
+    if name.endswith(".xml"):
+        return pd.read_xml(_io.BytesIO(raw), **kw)
+    if name.endswith(".tsv"):
+        return pd.read_csv(_io.BytesIO(raw), sep="\t", **kw)
+    if name.endswith((".accdb", ".mdb")):
+        try:
+            import tempfile, subprocess, os
+            with tempfile.NamedTemporaryFile(suffix=os.path.splitext(name)[1],
+                                            delete=False) as tmp:
+                tmp.write(raw)
+                tmp_path = tmp.name
+            tables_out = subprocess.run(
+                ["mdb-tables", "-1", tmp_path],
+                capture_output=True, text=True, timeout=30)
+            tbl = tables_out.stdout.strip().splitlines()[0] if tables_out.returncode == 0 else ""
+            if tbl:
+                result = subprocess.run(
+                    ["mdb-export", tmp_path, tbl],
+                    capture_output=True, text=True, timeout=30)
+                if result.returncode == 0:
+                    return pd.read_csv(_io.StringIO(result.stdout), **kw)
+            raise RuntimeError(f"mdb-export failed. stderr: {tables_out.stderr}")
+        except FileNotFoundError:
+            raise RuntimeError(
+                "Access (.accdb/.mdb) files need mdbtools installed on the server.\n"
+                "  macOS: brew install mdbtools\n"
+                "  Linux: sudo apt install mdbtools")
+    # Default → CSV (handles .txt and plain .csv)
+    for sep in (",", ";", "\t", "|", None):
+        try:
+            kwargs = dict(**kw)
+            if sep is not None:
+                kwargs["sep"] = sep
+            else:
+                kwargs.update(sep=None, engine="python")
+            return pd.read_csv(_io.BytesIO(raw), **kwargs)
+        except Exception:
+            continue
+    raise ValueError(f"Could not parse uploaded file: {f.name}")
+
+
 def execute_collation(components: list[str]) -> pd.DataFrame:
     """
     Build a formula's CVI by STACKING each variable's w-sets as ROWS (vertically)
@@ -1747,7 +2164,6 @@ def execute_collation(components: list[str]) -> pd.DataFrame:
     combined = pd.concat(pieces, axis=0, ignore_index=True)
     wcols = [c for c in combined.columns if str(c).startswith("w")]
     combined = combined[["Source"] + wcols]
-    combined.insert(0, "Row", range(1, len(combined) + 1))
     return combined
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2107,6 +2523,323 @@ def _data_status() -> list:
     return rows
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 7c. PICKS SCRAPER — full syndicate picks via thelott details API
+#     (previously thelott_picks_scraper.py — now inlined, no external file needed)
+#     Output: w1..wN columns per game line, saved to Global_Scraper/D_{STATE}.csv
+# ═══════════════════════════════════════════════════════════════════════════════
+import threading as _threading
+from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor, as_completed as _as_completed
+import csv as _csv
+
+_PICKS_MAX_WORKERS    = 6
+_PICKS_PER_REQ_PAUSE  = 0.12
+_PICKS_RETRY_TIMES    = 4
+_PICKS_RETRY_BACKOFF  = 1.5
+_PICKS_THROTTLE_CD    = 20
+_picks_print_lock     = _threading.Lock()
+_picks_throttle_lock  = _threading.Lock()
+_picks_throttle_hits  = 0
+
+_GAME_BY_COMPANY_PRODUCT = {
+    (3, 6): "sat", (3, 22): "sat", (3, 7): "mwf", (3, 25): "mwf",
+    (3, 8): "oz",  (3, 23): "oz",  (3, 9): "pb",  (3, 24): "pb",
+    (3, 10): "sfl", (3, 27): "sfl", (3, 37): "sat", (3, 1): "sat",
+    (3, 2): "oz", (3, 3): "pb", (3, 4): "mwf", (3, 5): "sfl",
+    (1, 1): "sat", (1, 2): "oz", (1, 3): "pb", (1, 4): "mwf", (1, 5): "sfl",
+    (2, 14): "sat", (2, 19): "sat", (2, 15): "oz", (2, 20): "oz",
+    (2, 16): "pb",  (2, 21): "pb",  (2, 17): "mwf", (2, 18): "sfl", (2, 3): "pb",
+    (6, 22): "sat", (6, 14): "sat", (6, 15): "oz", (6, 16): "pb",
+    (6, 17): "mwf", (6, 18): "sfl", (6, 19): "sat",
+}
+
+_GAME_KEY_TO_NAME = {
+    "pb": "Powerball", "oz": "Oz Lotto", "sat": "Saturday Lotto",
+    "mwf": "Monday & Wednesday Lotto", "sfl": "Set for Life",
+}
+
+_PICKS_POOL_MAX = {gk: cfg["pool"] for gk, cfg in GAMES_CFG.items()}
+
+_PICKS_DRAW_RANGES = {
+    "pb":  (1400, 1900), "oz":  (1500, 1900),
+    "sat": (4400, 4900), "mwf": (4400, 4900), "sfl": (1, 99999),
+}
+
+_PICKS_STATE_COMPANY = {"NSW": 3, "ACT": 3, "VIC": 1, "TAS": 1, "QLD": 2, "SA": 6}
+
+
+def _picks_api_get(url: str) -> dict:
+    import urllib.request as _ur, ssl as _ssl2
+    ctx = _ssl2.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = _ssl2.CERT_NONE
+    req = _ur.Request(url, headers={
+        "Accept": "application/json",
+        "Origin": "https://www.thelott.com",
+        "Referer": "https://www.thelott.com/",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    })
+    with _ur.urlopen(req, timeout=15, context=ctx) as r:
+        return json.loads(r.read().decode("utf-8-sig"))
+
+
+def _picks_outlets(postcode: str, state: str) -> list:
+    data = _picks_api_get(
+        f"https://api.thelott.com/outlet/outlets"
+        f"?state={state}&postcode_or_locality={postcode}")
+    if data.get("is_out_of_jurisdiction"):
+        return []
+    seen, ids = set(), []
+    for loc in data.get("locality_outlets", []):
+        for o in loc.get("outlets", []):
+            oid = o["outlet_id"]
+            if oid not in seen:
+                seen.add(oid); ids.append(oid)
+    return ids
+
+
+def _picks_syndicate_ids(outlet_ids: list, company: int, batch: int = 20) -> list:
+    seen = set()
+    for i in range(0, len(outlet_ids), batch):
+        csv_ids = ",".join(str(o) for o in outlet_ids[i:i + batch])
+        try:
+            data = _picks_api_get(
+                f"https://api.thelott.com/syndicates/api/search"
+                f"?company={company}&outlets={csv_ids}&limit=100")
+            for s in data.get("data", []):
+                seen.add(s["syndicateId"])
+        except Exception as ex:
+            print(f"    [warn] search batch: {ex}")
+        time.sleep(0.15)
+    return sorted(seen)
+
+
+def _game_for(company, product, draw_number):
+    g = _GAME_BY_COMPANY_PRODUCT.get((company, product))
+    if g and draw_number:
+        lo, hi = _PICKS_DRAW_RANGES.get(g, (1, 99999))
+        if not (lo <= int(draw_number) <= hi):
+            return g, f"CHECK(draw {draw_number} out of {g} range)"
+    return (g or f"unknown_c{company}_p{product}"), ""
+
+
+def _resolve_game(company, product, draw_number, selections):
+    g, note = _game_for(company, product, draw_number)
+    mx = max(int(n) for n in selections) if selections else 0
+    pool = _PICKS_POOL_MAX.get(g)
+    if pool is not None and mx <= pool and g in _PICKS_POOL_MAX:
+        return g, note
+    dn = int(draw_number) if str(draw_number).isdigit() else 0
+    inferred = None
+    if 4400 <= dn <= 4900:
+        inferred = "mwf" if g == "mwf" else "sat"
+    elif 1400 <= dn <= 1900:
+        inferred = "pb" if mx <= 35 else "oz"
+    elif mx >= 46:
+        inferred = "oz"
+    elif mx == 45:
+        inferred = "mwf" if g == "mwf" else "sat"
+    elif mx <= 44 and g == "sfl":
+        inferred = "sfl"
+    else:
+        for gk in ("pb", "sfl", "sat", "mwf", "oz"):
+            if _PICKS_POOL_MAX.get(gk, 0) >= mx:
+                inferred = gk; break
+    if inferred and _PICKS_POOL_MAX.get(inferred, 0) >= mx:
+        tag = "retagged" if g in _PICKS_POOL_MAX else "inferred"
+        return inferred, f"{tag} {g}->{inferred} (max {mx}, draw {dn})"
+    return (g or "unknown"), f"UNRESOLVED (max {mx})"
+
+
+def _picks_fetch_details(syndicate_id: int, company: int) -> list:
+    try:
+        b = _picks_api_get(
+            f"https://api.thelott.com/syndicates/api/details"
+            f"?syndicateId={syndicate_id}&companyId={company}")
+    except Exception as ex:
+        print(f"    [warn] details {syndicate_id}: {ex}"); return []
+    name  = (b.get("syndicateName") or "").strip()
+    cost  = b.get("shareCost", "")
+    avail = b.get("availableShares", "")
+    total = b.get("totalShares", "")
+    outlets = b.get("outlets", [])
+    outlet_id = ""
+    if isinstance(outlets, list) and outlets:
+        outlet_id = (outlets[0].get("outletId") if isinstance(outlets[0], dict) else "") or ""
+    rows = []
+    for bet in b.get("syndicateBets", []):
+        product    = bet.get("product")
+        draws      = bet.get("draws", [])
+        draw_no    = draws[0].get("drawNumber") if draws else ""
+        draw_dt    = (draws[0].get("drawDate", "")[:10]) if draws else ""
+        entries    = bet.get("entries", [])
+        entry_type = entries[0].get("entryType", "") if entries else ""
+        for g in bet.get("games", []):
+            sels = g.get("selections", []) or []
+            if not sels:
+                continue
+            game, warn = _resolve_game(company, product, draw_no, sels)
+            mx = max(int(n) for n in sels)
+            if mx > max(_PICKS_POOL_MAX.values()) or mx < 1:
+                continue
+            pb_raw = g.get("powerball", "")
+            if game != "pb":
+                pb_val = ""
+            elif g.get("powerHit") and (pb_raw in (0, "0", None, "")):
+                pb_val = "PH"
+            elif pb_raw in (0, "0", None, ""):
+                pb_val = ""
+            else:
+                pb_val = pb_raw
+            row = {
+                "Syndicate_ID": syndicate_id, "Syndicate_Name": name,
+                "Game": game, "Games": _GAME_KEY_TO_NAME.get(game, game),
+                "Game_Check": warn, "Product": product, "CompanyId": company,
+                "Draw_Number": draw_no, "Draw_Date": draw_dt,
+                "Entry_Type": entry_type, "System_Number": g.get("systemNumber", ""),
+                "PowerHit": g.get("powerHit", ""), "Share_Cost": cost,
+                "Available_Shares": avail, "Total_Shares": total,
+                "Outlet_ID": outlet_id, "PB": pb_val,
+            }
+            for i, n in enumerate(sels, 1):
+                row[f"w{i}"] = n
+            rows.append(row)
+    return rows
+
+
+def _picks_fetch_retry(syndicate_id: int, company: int) -> list:
+    global _picks_throttle_hits
+    import urllib.error as _urlerr2
+    for attempt in range(1, _PICKS_RETRY_TIMES + 1):
+        try:
+            rows = _picks_fetch_details(syndicate_id, company)
+            time.sleep(_PICKS_PER_REQ_PAUSE)
+            return rows
+        except _urlerr2.HTTPError as ex:
+            if ex.code == 403:
+                with _picks_throttle_lock:
+                    _picks_throttle_hits += 1
+                    first = (_picks_throttle_hits == 1)
+                if first:
+                    with _picks_print_lock:
+                        print("    [throttle] 403 rate limit — cooling down and retrying")
+                if attempt == _PICKS_RETRY_TIMES:
+                    return []
+                time.sleep(_PICKS_THROTTLE_CD * attempt)
+            else:
+                if attempt == _PICKS_RETRY_TIMES:
+                    return []
+                time.sleep(_PICKS_RETRY_BACKOFF * attempt)
+        except Exception:
+            if attempt == _PICKS_RETRY_TIMES:
+                return []
+            time.sleep(_PICKS_RETRY_BACKOFF * attempt)
+    return []
+
+
+def _picks_collect_ids(state: str, company: int) -> dict:
+    """Phase 1 (sequential): collect unique syndicate IDs across all postcodes."""
+    pcs = [str(p) for p in STATE_POSTCODES.get(state, [])]
+    seen: dict = {}
+    for i, pc in enumerate(pcs):
+        try:
+            outlets = _picks_outlets(pc, state)
+        except Exception as ex:
+            print(f"  [{i+1}/{len(pcs)}] {pc} outlet error: {ex}"); continue
+        if not outlets:
+            continue
+        ids = _picks_syndicate_ids(outlets, company)
+        new = sum(1 for sid in ids if sid not in seen)
+        for sid in ids:
+            if sid not in seen:
+                seen[sid] = pc
+        print(f"  [{i+1}/{len(pcs)}] {pc}: {len(ids)} here, +{new} new (unique: {len(seen)})")
+        time.sleep(0.1)
+    return seen
+
+
+def _picks_dedup(rows: list) -> list:
+    seen: set = set()
+    out = []
+    for r in rows:
+        wkey = tuple(r.get(f"w{i}") for i in range(1, 40) if r.get(f"w{i}") is not None)
+        key = (r.get("Syndicate_ID"), r.get("Draw_Number"), r.get("Game"), wkey, r.get("PB"))
+        if key not in seen:
+            seen.add(key); out.append(r)
+    return out
+
+
+def _picks_columns(rows: list) -> list:
+    preferred = ["Syndicate_ID", "Syndicate_Name", "Game", "Games", "Game_Check",
+                 "Product", "CompanyId", "Draw_Number", "Draw_Date", "Entry_Type",
+                 "System_Number", "PowerHit", "Share_Cost", "Available_Shares",
+                 "Total_Shares", "Outlet_ID", "Postcode", "State", "PB"]
+    keys: set = set()
+    for r in rows:
+        keys.update(r.keys())
+    wcols = sorted((k for k in keys if len(k) > 1 and k[0] == "w" and k[1:].isdigit()),
+                   key=lambda x: int(x[1:]))
+    ordered = [c for c in preferred if c in keys]
+    rest = sorted(k for k in keys if k not in ordered
+                  and not (len(k) > 1 and k[0] == "w" and k[1:].isdigit()))
+    return ordered + rest + wcols
+
+
+def sweep_state_picks(state: str, workers: int = _PICKS_MAX_WORKERS,
+                      save_path: "Path | None" = None) -> list:
+    """Two-phase dedup-first sweep — returns rows with w1..wN actual picks.
+    Saves to Global_Scraper/D_{state}.csv (or override with save_path).
+
+    Replaces: python3 thelott_picks_scraper.py sweep {state}
+    Now call:  from masterapp import sweep_state_picks; sweep_state_picks('NSW')
+    """
+    global _picks_throttle_hits
+    _picks_throttle_hits = 0
+    company = _PICKS_STATE_COMPANY.get(state)
+    if company is None:
+        print(f"  no company id for {state}"); return []
+
+    print(f"--- Phase 1: collecting unique syndicate IDs for {state} ---")
+    t0 = time.time()
+    id_map = _picks_collect_ids(state, company)
+    ids = list(id_map.keys())
+    print(f"--- Phase 1 done: {len(ids)} unique syndicates in {time.time()-t0:.0f}s ---")
+    if not ids:
+        print("  no syndicates found."); return []
+
+    print(f"--- Phase 2: fetching details ({workers} workers) ---")
+    t1 = time.time()
+    all_rows: list = []
+    done = 0
+    with _ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(_picks_fetch_retry, sid, company): sid for sid in ids}
+        for fut in _as_completed(futures):
+            sid = futures[fut]
+            recs = fut.result() or []
+            pc = id_map.get(sid, "")
+            for r in recs:
+                r["Postcode"] = pc; r["State"] = state
+            all_rows.extend(recs)
+            done += 1
+            if done % 50 == 0 or done == len(ids):
+                with _picks_print_lock:
+                    print(f"    details {done}/{len(ids)} ({len(all_rows)} rows so far)")
+    print(f"--- Phase 2 done in {time.time()-t1:.0f}s ---")
+
+    before = len(all_rows)
+    all_rows = _picks_dedup(all_rows)
+    if not all_rows:
+        print("  (no rows)"); return []
+    out_path = save_path or (DIRS["Global_Scraper"] / f"D_{state}.csv")
+    cols = _picks_columns(all_rows)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", newline="") as f:
+        w = _csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+        w.writeheader(); w.writerows(all_rows)
+    print(f"  saved {len(all_rows)} unique rows (deduped from {before}) -> {out_path}")
+    return all_rows
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # 8. CVI MATRIX — transposition + variable slicing
 # ═══════════════════════════════════════════════════════════════════════════════
 def build_w_matrix(df_raw: pd.DataFrame) -> pd.DataFrame:
@@ -2265,6 +2998,75 @@ def save_since_last(sl_dict: dict, game_key: str, label: str, pool: int,
     sl_file.parent.mkdir(parents=True, exist_ok=True)
     sl_file.write_text(json.dumps(data, indent=2))
     return data
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 8b. AUTO-WIRE GENERATORS — runs Sp / So (and Ep if B+R ready) from D
+# ═══════════════════════════════════════════════════════════════════════════════
+def _auto_wire_generators(gdirs: dict, gkey: str):
+    """Auto-run Sp, So (and Ep when B+R are available) immediately after D loads.
+
+    Uses prepare_d_input_sets to peel the 4/8 longest D rows (w1,w2,w3,w4…) as
+    column-oriented sets, then feeds them to the generators. Results are stored
+    in S and written to disk so subsequent tabs show them instantly.
+    """
+    d_df = S.get("D", pd.DataFrame())
+    if d_df is None or d_df.empty:
+        return
+
+    auto_status = st.empty()
+    msgs = []
+
+    # ── Sp (Splits / task1b) ────────────────────────────────────────────────
+    try:
+        sp_input = prepare_d_input_sets(d_df, 4)  # columns: w1,w2,w3,w4
+        if not sp_input.empty:
+            sp_df = generate_splits(sp_input)
+            if not sp_df.empty:
+                S["Sp"] = sp_df
+                sp_path = gdirs["Splits"] / f"Sp_{gkey}.csv"
+                sp_df.to_csv(sp_path, index=False)
+                msgs.append(f"Sp ({sp_df.shape[1]} cols)")
+    except Exception as _sp_ex:
+        msgs.append(f"Sp error: {_sp_ex}")
+
+    # ── So (SplitsCombi / automation_vba) ──────────────────────────────────
+    try:
+        so_input = prepare_d_input_sets(d_df, 4)  # columns: w1,w2,w3,w4
+        if not so_input.empty:
+            so_df = generate_splits_combi(so_input)
+            if not so_df.empty:
+                S["So"] = so_df
+                so_path = gdirs["Splits_Combi"] / f"So_{gkey}.csv"
+                so_df.to_csv(so_path, index=False)
+                msgs.append(f"So ({so_df.shape[1]} cols)")
+    except Exception as _so_ex:
+        msgs.append(f"So error: {_so_ex}")
+
+    # ── Ep (ExcelPro) — requires R's wt list ───────────────────────────────
+    b_df = S.get("B", pd.DataFrame())
+    r_wt_df = S.get("_R_wt", pd.DataFrame())
+    if not b_df.empty and not r_wt_df.empty:
+        try:
+            ep_objs = prepare_ep_objects(d_df, mode="pairs")  # 8 longest rows → 4 pairs
+            wt_list = r_wt_df["wt"].dropna().tolist() if "wt" in r_wt_df.columns else []
+            if not wt_list:
+                # Fall back to all_wt column or any numeric column
+                wt_list = r_wt_df.iloc[:, 0].dropna().tolist()
+            if ep_objs and wt_list:
+                ep_df = generate_excelpro(ep_objs, wt_list)
+                if not ep_df.empty:
+                    S["Ep"] = ep_df
+                    ep_path = gdirs["ExcelPro"] / f"Ep_{gkey}.csv"
+                    ep_df.to_csv(ep_path, index=False)
+                    msgs.append(f"Ep ({ep_df.shape[1]} cols)")
+        except Exception as _ep_ex:
+            msgs.append(f"Ep error: {_ep_ex}")
+
+    if msgs:
+        auto_status.markdown(
+            f'<div class="ok">⚡ Auto-generated: {" · ".join(msgs)}</div>',
+            unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2794,7 +3596,7 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
         # ── Single file promote (legacy) ──────────────────────────────────────
         with st.expander("📤 Promote single file to Direct/ (legacy)"):
             promote_candidates = (sorted(DIRS["Global_Scraper"].glob("D_*.csv")) +
-                                  sorted(DIRS["Scraper"].glob("D_*.csv")))
+                                  sorted(active_game_dirs()["Scraper"].glob("D_*.csv")))
             if promote_candidates:
                 chosen = st.selectbox("File to promote:",
                                       [f"{fp.parent.name}/{fp.name}"
@@ -2811,10 +3613,10 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
                     if st.button("📤 Promote to Direct/",
                                  use_container_width=True, key="do_promote"):
                         import shutil
-                        dst = DIRS["Direct"] / chosen_fp.name
+                        dst = active_game_dirs()["Direct"] / chosen_fp.name
                         shutil.copy2(chosen_fp, dst)
-                        S["D"] = d_to_w_only(_load_file(dst))
-                        st.success(f"Promoted → Direct/{chosen_fp.name} "
+                        S["D"] = _load_file(dst)
+                        st.success(f"Promoted → {dst.parent.name}/{chosen_fp.name} "
                                    f"({len(S['D']):,} rows loaded)")
             else:
                 st.info("No D_*.csv files found.")
@@ -2875,13 +3677,12 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
         # SECTION 6 — UPLOAD PRE-SCRAPED FILE
         # ══════════════════════════════════════════════════════════════════════
         with st.expander("📤 Upload a pre-scraped CSV"):
-            up = st.file_uploader("CSV or Excel", type=["csv", "xlsx"],
-                                  key="scraper_upload")
+            up = st.file_uploader("Upload data file (CSV, Excel, HTML, JSON, XML, …)",
+                                  type=_UPLOAD_TYPES, key="scraper_upload")
             if up:
-                df_up = (pd.read_excel(up) if up.name.endswith(".xlsx")
-                         else pd.read_csv(up))
-                sp = DIRS["Main_Data"] / (up.name if up.name.endswith(".csv")
-                                          else up.name.replace(".xlsx", ".csv"))
+                df_up = _read_uploaded(up)
+                stem = up.name.rsplit(".", 1)[0]
+                sp = active_game_dirs()["Main_Data"] / f"{stem}.csv"
                 df_up.to_csv(sp, index=False)
                 st.markdown(f'<div class="ok">✅ {sp.name} — {len(df_up):,} rows saved '
                             f'to Main_Data/</div>', unsafe_allow_html=True)
@@ -2893,24 +3694,22 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
         # ══════════════════════════════════════════════════════════════════════
         with st.expander("⏰ Run sweeps from terminal + Schedule nightly (Mac)"):
             script_path = Path(__file__).resolve()
-            scraper_py  = script_path.parent / "thelott_picks_scraper.py"
             log_path    = ROOT / "logs" / "scraper.log"
 
             st.markdown(
                 '<div class="note">💡 <b>Tip:</b> Use the <b>SWEEP STATES</b> buttons in '
-                'Section 2 above for in-app scraping. Only drop to terminal if '
-                'Streamlit SSL blocks the network calls.</div>',
+                'Section 2 above for in-app scraping. The scraper is fully inlined in '
+                'masterapp.py — <b>no separate thelott_picks_scraper.py needed.</b></div>',
                 unsafe_allow_html=True)
 
             st.markdown("**Copy a command → paste directly into your terminal:**")
 
-            # Individual state commands — each in its own copy-friendly block
             _cmds_state = {
-                "NSW": f"cd {script_path.parent} && python3 thelott_picks_scraper.py sweep NSW",
-                "VIC": f"cd {script_path.parent} && python3 thelott_picks_scraper.py sweep VIC",
-                "QLD": f"cd {script_path.parent} && python3 thelott_picks_scraper.py sweep QLD",
-                "SA":  f"cd {script_path.parent} && python3 thelott_picks_scraper.py sweep SA",
-                "TAS": f"cd {script_path.parent} && python3 thelott_picks_scraper.py sweep TAS",
+                "NSW": f"cd {script_path.parent} && python3 -c \"from masterapp import sweep_state_picks; sweep_state_picks('NSW')\"",
+                "VIC": f"cd {script_path.parent} && python3 -c \"from masterapp import sweep_state_picks; sweep_state_picks('VIC')\"",
+                "QLD": f"cd {script_path.parent} && python3 -c \"from masterapp import sweep_state_picks; sweep_state_picks('QLD')\"",
+                "SA":  f"cd {script_path.parent} && python3 -c \"from masterapp import sweep_state_picks; sweep_state_picks('SA')\"",
+                "TAS": f"cd {script_path.parent} && python3 -c \"from masterapp import sweep_state_picks; sweep_state_picks('TAS')\"",
             }
             for _state, _cmd in _cmds_state.items():
                 st.markdown(f"**Sweep {_state}:**")
@@ -2918,7 +3717,12 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
 
             st.markdown("**Sweep ALL states at once (recommended):**")
             st.code(
-                f"cd {script_path.parent} && python3 thelott_picks_scraper.py sweep ALL",
+                f"cd {script_path.parent} && python3 -c \"\n"
+                f"from masterapp import sweep_state_picks\n"
+                f"for s in ['NSW','VIC','QLD','SA','TAS']:\n"
+                f"    print(f'=== sweeping {{s}} ===')\n"
+                f"    sweep_state_picks(s)\n"
+                f"\"",
                 language="bash")
 
             st.markdown("**After sweeping — split and combine by game:**")
@@ -2938,8 +3742,10 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
                 f"# 1. Open crontab editor:\n"
                 f"crontab -e\n\n"
                 f"# 2. Add this line, then save:\n"
-                f"0 2 * * * cd {script_path.parent} && "
-                f"python3 thelott_picks_scraper.py sweep ALL >> {log_path} 2>&1",
+                f"0 2 * * * cd {script_path.parent} && python3 -c \""
+                f"from masterapp import sweep_state_picks; "
+                f"[sweep_state_picks(s) for s in ['NSW','VIC','QLD','SA','TAS']]"
+                f"\" >> {log_path} 2>&1",
                 language="bash")
 
 
@@ -2961,6 +3767,11 @@ for _i, _gk in enumerate(GAME_KEYS):
             use_container_width=True,
         ):
             st.session_state["active_game"] = _gk
+            # Auto-reload B for the newly selected game so it's available
+            # immediately (before the user clicks the B tab).
+            _b_new = _auto_load_b(_gk)
+            if not _b_new.empty:
+                S["B"] = _b_new
             st.rerun()
 
 _gcfg  = active_game_cfg()
@@ -3032,11 +3843,11 @@ mdb-export /path/to/file.accdb TableName > ~/Desktop/Sika/o_Automation_Suite/Gam
 
     # ── Upload (for smaller files under config limit) ──────────────────────
     up = st.file_uploader(
-        "Upload Main Data file (CSV/Excel — for files under 10GB after config update)",
-        type=["csv", "xlsx", "xls", "txt", "xml"],
+        "Upload Main Data file (CSV, Excel, HTML, JSON, XML, TSV, …)",
+        type=_UPLOAD_TYPES,
         key="up_main_data")
     if up:
-        path = _gdirs["Main_Data"] / f"MAIN_{up.name}"
+        path = _gdirs["Main_Data"] / up.name
         path.write_bytes(up.getvalue())
         st.markdown(
             f'<div class="ok">✅ Saved to disk: <code>{path.name}</code> '
@@ -3050,18 +3861,17 @@ mdb-export /path/to/file.accdb TableName > ~/Desktop/Sika/o_Automation_Suite/Gam
         st.rerun()
 
     existing = sorted(
-        list(_gdirs["Main_Data"].glob("MAIN_*")) +
         list(_gdirs["Main_Data"].glob("*.csv")) +
         list(_gdirs["Main_Data"].glob("*.xlsx")) +
         list(_gdirs["Main_Data"].glob("*.accdb")) +
         list(_gdirs["Main_Data"].glob("*.mdb"))
     )
-    # Also check legacy root Main_Data
+    # Also check legacy 1n subfolder
     existing += sorted(
-        list(DIRS["Main_Data"].glob("1n")) +
-        [DIRS["Main_Data"] / "1n" / f
+        list(_gdirs["Main_Data"].glob("1n")) +
+        [_gdirs["Main_Data"] / "1n" / f
          for f in ["Main_Data.xlsx", "Main_Data.csv"]
-         if (DIRS["Main_Data"] / "1n" / f).exists()]
+         if (_gdirs["Main_Data"] / "1n" / f).exists()]
     )
     existing = list(dict.fromkeys(existing))  # deduplicate
 
@@ -3144,7 +3954,7 @@ elif page == "🔄 CVI Matrix":
     st.markdown(f"""
     <div class="info">
     <b>Active game: {_gcfg['emoji']} {_gcfg['label']}</b><br>
-    Reads D from <code>Games/{_gkey.upper()}/Games_Breakdown/</code>
+    Reads D from <code>Games/{_gkey.upper()}/games_breakdown_{_gkey}/</code>
     (run <b>Promote All + Split by Game</b> on the Scraper page first).<br>
     Defaults to <b>D_ALL_{_gkey}.csv</b> — all states combined (national view).
     Each syndicate row → one w-column. Sorted longest→shortest.
@@ -3183,8 +3993,21 @@ elif page == "🔄 CVI Matrix":
         chosen = st.selectbox("Source D file:", file_labels, key="cvi_d_sel")
         chosen_fp = all_files[file_labels.index(chosen)]
         df_raw = pd.read_csv(chosen_fp)
-        st.write(f"**{len(df_raw):,} rows · {len(df_raw.columns)} columns**")
-        st.dataframe(df_raw.head(5), use_container_width=True)
+        _raw_wcols = [c for c in df_raw.columns if re.match(r'^w\d+$', str(c), re.I)]
+        _raw_meta  = [c for c in df_raw.columns if c not in _raw_wcols]
+        st.write(f"**{len(df_raw):,} syndicates · {len(_raw_wcols)} number positions**")
+        # Restore original source view: all metadata columns, then 'w' label, then numbers.
+        # Each ROW = one syndicate. The 'w' column labels it (w1, w2, w3…).
+        # The original w1..w27 column headers are renamed to 1, 2, 3… (position numbers).
+        _prev_n  = min(50, len(df_raw))
+        _raw_disp = df_raw.head(_prev_n).copy()
+        # Insert 'w' label column right after the last metadata column
+        _insert_at = len(_raw_meta)
+        _raw_disp.insert(_insert_at, "w", [f"w{i+1}" for i in range(len(_raw_disp))])
+        # Rename w1..w27 → 1, 2, 3…
+        _raw_disp = _raw_disp.rename(columns={wc: str(i+1) for i, wc in enumerate(_raw_wcols)})
+        st.caption(f"Showing first {_prev_n} of {len(df_raw):,} syndicates — 'w' column labels each row:")
+        st.dataframe(_raw_disp, use_container_width=True, height=280)
 
         if st.button("🔄 BUILD W-MATRIX & SLICE Ep / Sp / So",
                      type="primary", use_container_width=True):
@@ -3207,65 +4030,105 @@ elif page == "🔄 CVI Matrix":
                          "w1…wN columns (main-data n1…nN is also accepted).")
             else:
                 mfname = chosen_fp.name.replace("D_", "CVI_Matrix_")
-                # Save CVI matrix to game-specific CVI folder
                 cvi_out = _gdirs["CVI"] / mfname
                 w_mat.to_csv(cvi_out, index=False)
                 st.markdown(f'<div class="ok">✅ W-Matrix: {len(w_mat.columns):,} '
-                            f'w-columns (longest pick = {len(w_mat)} numbers) '
+                            f'w-sets · longest pick = {len(w_mat)} numbers '
                             f'→ saved to Games/{_gkey.upper()}/</div>',
                             unsafe_allow_html=True)
 
-                slices = slice_variables(w_mat)
-                # The D variable used by the formula must be the CLEAN w-only
-                # matrix — NOT df_raw, which still carries metadata columns
-                # (Syndicate_ID, Draw_Number, Outlet_ID, Postcode, Share_Cost…).
-                # Without this, collation pulled those metadata values in as if
-                # they were numbers (the 4687/1400286/2000 leak seen in BRD).
                 S["D"] = w_mat
-                # Save Ep, Sp, So to game-specific folders
-                stem = chosen_fp.stem.split("_", 1)[1] if "_" in chosen_fp.stem else chosen_fp.stem
-                slices["Ep"].to_csv(_gdirs["ExcelPro"] / f"Ep_{stem}.csv", index=False)
-                slices["Sp"].to_csv(_gdirs["Splits"]   / f"Sp_{stem}.csv", index=False)
-                slices["So"].to_csv(_gdirs["Splits_Combi"] / f"So_{stem}.csv", index=False)
 
-                S["Ep"] = slices["Ep"]
-                S["Sp"] = slices["Sp"]
-                S["So"] = slices["So"]
-
+                # ── ROW VIEW: w label on the LEFT, numbers across each row ──
+                # The w-matrix as built has each w-set as a COLUMN (w1, w2, …).
+                # We transpose so that each row = one w-set and the leftmost
+                # column is the w label — longest pick at the top.
+                st.markdown("---")
+                st.markdown("### 📋 W-Matrix — row view (w label · numbers across · longest first)")
                 st.markdown(
-                    f'<div class="ok">✅ Ep, Sp, So saved to '
-                    f'Games/{_gkey.upper()}/Variables/Variable_Elements/</div>',
+                    '<div class="info">Each row is one syndicate w-set. '
+                    'The <b>w</b> column on the left is the set name. '
+                    'Numbers run across to the right. '
+                    'Rows sorted <b>longest → shortest</b> (most numbers at top).</div>',
                     unsafe_allow_html=True)
 
+                # Transpose: columns of w_mat become rows
+                _wcols_mat = [c for c in w_mat.columns if re.match(r'^w\d+$', str(c), re.I)]
+                _w_sub = w_mat[_wcols_mat]
+                # Each column is a w-set; T gives us: index=old col names, cols=row positions
+                _w_T = _w_sub.T.reset_index()
+                _w_T.columns = ["w"] + [f"pos_{i+1}" for i in range(_w_T.shape[1] - 1)]
+                # Sort by count of non-null values (longest first)
+                _w_T["_len"] = _w_T[[c for c in _w_T.columns if c.startswith("pos_")]].notna().sum(axis=1)
+                _w_T = _w_T.sort_values("_len", ascending=False).drop(columns=["_len"])
+                _w_T = _w_T.reset_index(drop=True)
+
+                # ── RENUMBERING TABLE: old_w → new_w after sort ───────────
+                st.markdown("#### 🔢 Renumbering — old position → new position after sort")
+                st.markdown(
+                    '<div class="note">After sorting longest → shortest, each w-set gets '
+                    'a new sequential number. This table shows the before/after mapping. '
+                    'The <b>old_w</b> column is dropped once you are satisfied with the '
+                    'new order.</div>',
+                    unsafe_allow_html=True)
+                _renum_rows = []
+                for _new_i, _old_w in enumerate(_w_T["w"].tolist()):
+                    _n_nums = int(w_mat[_old_w].notna().sum()) if _old_w in w_mat.columns else 0
+                    _renum_rows.append({
+                        "new_w":    f"w{_new_i + 1}",
+                        "old_w":    _old_w,
+                        "numbers":  _n_nums,
+                    })
+                _renum_df = pd.DataFrame(_renum_rows)
+                st.dataframe(_renum_df, use_container_width=True, height=min(320, 40 * len(_renum_df) + 40))
+
+                # Apply new w labels to the transposed view
+                _w_T.insert(0, "new_w", [f"w{i+1}" for i in range(len(_w_T))])
+                # Show preview (cap at 200 rows for display speed)
+                _show_n = min(200, len(_w_T))
+                if len(_w_T) > _show_n:
+                    st.caption(f"Preview — first {_show_n} of {len(_w_T):,} rows:")
+                st.dataframe(_w_T.head(_show_n), use_container_width=True, height=380)
+                st.download_button(
+                    f"⬇ Download W-Matrix (row view) — {len(_w_T):,} rows",
+                    to_csv_bytes(_w_T),
+                    mfname.replace("CVI_Matrix_", "W_Rows_"),
+                    "text/csv",
+                    key="dl_wmat_rows"
+                )
+
+                st.markdown("---")
+                st.markdown("#### Variable slices (Ep · Sp · So)")
                 c1, c2, c3 = st.columns(3)
                 with c1:
-                    st.markdown("**Ep input** — top 8 cols of D *(feeds ExcelPro; not generated yet)*")
+                    st.markdown("**Ep** — top 8 w-sets")
                     st.dataframe(slices["Ep"], height=200, use_container_width=True)
                 with c2:
-                    st.markdown("**Sp input** — top 4 cols of D *(feeds Splits; not generated yet)*")
+                    st.markdown("**Sp** — top 4 lanes (a–d)")
                     st.dataframe(slices["Sp"], height=200, use_container_width=True)
                 with c3:
-                    st.markdown("**So input** — union of top 4 *(feeds SplitsCombi; not generated yet)*")
+                    st.markdown("**So** — union of Sp lanes")
                     st.dataframe(slices["So"], height=200, use_container_width=True)
 
         # Browse existing CVI matrices for this game
         cvi_files = sorted(_gdirs["CVI"].glob("CVI_Matrix_*.csv"))
         if cvi_files:
             st.markdown("---")
-            cm = st.selectbox("Inspect matrix:", [f.name for f in cvi_files],
+            cm = st.selectbox("Inspect saved matrix:", [f.name for f in cvi_files],
                               key="cvi_inspect_sel")
             df_m = pd.read_csv(_gdirs["CVI"] / cm)
-            n_cols_m = len(df_m.columns)
-            # "depth" wording removed — per the data model, COLUMNS are the
-            # syndicate w-columns and a column's LENGTH is its pick count; the
-            # matrix is as many rows tall as the LONGEST column (longest pick).
-            longest = int(df_m.notna().sum(axis=0).max()) if n_cols_m else 0
-            st.write(f"{n_cols_m:,} w-columns (w1…w{n_cols_m}) · "
-                     f"longest column = {longest} numbers")
-            n_show = min(60, n_cols_m)
-            if n_cols_m > n_show:
-                st.caption(f"Preview — first {n_show} of {n_cols_m:,} columns:")
-            st.dataframe(df_m.iloc[:, :n_show], use_container_width=True, height=300)
+            _wcols_m = [c for c in df_m.columns if re.match(r'^w\d+$', str(c), re.I)]
+            _meta_m  = [c for c in df_m.columns if c not in _wcols_m]
+            st.write(f"**{len(df_m):,} syndicates · {len(_wcols_m)} number positions**")
+            # Each ROW = one syndicate = one w-set.
+            # Add 'w' label column, rename w1..wN headers to 1, 2, 3… (position numbers).
+            # No transposing needed — just relabel.
+            _cap_m = min(50, len(df_m))
+            _df_m_disp = df_m[_wcols_m].head(_cap_m).copy()
+            _df_m_disp.insert(0, "w", [f"w{i+1}" for i in range(len(_df_m_disp))])
+            _df_m_disp = _df_m_disp.rename(columns={wc: str(i+1) for i, wc in enumerate(_wcols_m)})
+            st.caption(f"Showing first {_cap_m} of {len(df_m):,} syndicates — each row is one w-set:")
+            st.dataframe(_df_m_disp, use_container_width=True, height=min(40*_cap_m+80, 460))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE: VARIABLE INPUTS
@@ -3283,12 +4146,19 @@ elif page == "🧩 Variable Inputs":
     <div class="info">
     <b>Active game: {_gcfg['emoji']} {_gcfg['label']}</b> — Pool 1–{_gcfg['pool']},
     Pick {_gcfg['pick']}, draws {_gcfg['draw_day']}.<br>
-    <b>B</b> = pre-loaded w-columns from <b>Base_&lt;game&gt;.xlsx</b> (e.g. Base_sat.xlsx, sheet B_sat; rarely changes).<br>
-    <b>Ep</b> = ExcelPro INPUT: top 8 w-columns of D (generation code not wired yet — shown as input).<br>
-    <b>Sp</b> = Splits INPUT (task1b): top 4 w-columns of D (generation not wired yet — shown as input).<br>
-    <b>So</b> = SplitsCombi INPUT (auto_vba): top 4 w-columns of D (generation not wired yet — shown as input).<br>
+    <b>B</b> = pre-loaded w-columns from <b>Base_&lt;game&gt;.xlsx</b> (e.g. Base_sat.xlsx, sheet B_sat;
+    auto-loaded from your project folder — rarely changes).<br>
+    <b>Ep</b> = ExcelPro output: pairs the 8 longest rows of D (w1–w8) into 4 objects, then
+    filters R's wt list through each object's two halves. <b>Auto-runs when D is loaded.</b><br>
+    <b>Sp</b> = Splits (task1b): uses the 4 longest rows of ALL D (w1,w2,w3,w4) as input sets —
+    splits each in half and computes set-algebra combinations. <b>Auto-runs when D is loaded.</b><br>
+    <b>So</b> = SplitsCombi (auto_vba): same 4 longest rows of D → union combis of split halves.
+    <b>Auto-runs when D is loaded.</b><br>
     <b>R</b>  = Rainbow (task2): Since Last from lottolyzer → powerset combos.<br>
-    <b>D</b>  = Syndicate w-columns (standalone + feeds formula row 11).
+    <b>D</b>  = Syndicate w-columns (standalone + feeds formula row 11).<br>
+    <b>Note:</b> In ALL D, each syndicate IS a row; w1,w2,… label the number positions across.
+    The generators peel the N longest rows and re-orient them as columns w1,w2,… (one set per column)
+    so the set-algebra code can work on them as independent pools.
     </div>
     """, unsafe_allow_html=True)
 
@@ -3324,18 +4194,56 @@ elif page == "🧩 Variable Inputs":
                     sheet = xl_b.sheet_names[0]   # per-game file with one sheet
                 if sheet is not None:
                     df_b_raw = xl_b.parse(sheet, header=None)
-                    # Row 0 = w-column headers, rows 1+ = data
-                    w_cols_b = [str(df_b_raw.iloc[0, c])
-                                for c in range(df_b_raw.shape[1])
-                                if str(df_b_raw.iloc[0, c]).startswith("w")]
+
+                    def _nums_from_series(s):
+                        """Extract positive integers from a pandas Series."""
+                        out = []
+                        for v in s.dropna():
+                            try:
+                                fv = float(v)
+                                if fv >= 1:
+                                    out.append(int(fv))
+                            except (ValueError, TypeError):
+                                pass
+                        return out
+
                     b_data = {}
-                    for i, wc in enumerate(w_cols_b):
-                        col_vals = df_b_raw.iloc[1:, i].dropna()
-                        nums = [int(float(v)) for v in col_vals
-                                if str(v).replace(".", "").replace("-", "").isdigit()
-                                and float(v) >= 1]
-                        if nums:
-                            b_data[wc] = pd.Series(nums)
+
+                    # ── Strategy 1: row 0 contains "w"-prefixed headers ────────
+                    w_cols_b = [str(df_b_raw.iloc[0, c]).strip()
+                                for c in range(df_b_raw.shape[1])
+                                if str(df_b_raw.iloc[0, c]).strip().lower().startswith("w")]
+                    if w_cols_b:
+                        for i, wc in enumerate(w_cols_b):
+                            nums = _nums_from_series(df_b_raw.iloc[1:, i])
+                            if nums:
+                                b_data[wc] = pd.Series(nums)
+
+                    # ── Strategy 2: parsed with header=0, columns named w* ────
+                    if not b_data:
+                        df_b_hdr = xl_b.parse(sheet)
+                        w_hdr_cols = [c for c in df_b_hdr.columns
+                                      if str(c).strip().lower().startswith("w")]
+                        for wc in w_hdr_cols:
+                            nums = _nums_from_series(df_b_hdr[wc])
+                            if nums:
+                                b_data[str(wc).strip()] = pd.Series(nums)
+
+                    # ── Strategy 3: auto-detect — every numeric column = a w-set
+                    if not b_data:
+                        w_idx = 1
+                        for ci in range(df_b_raw.shape[1]):
+                            nums = _nums_from_series(df_b_raw.iloc[:, ci])
+                            if nums:
+                                b_data[f"w{w_idx}"] = pd.Series(nums)
+                                w_idx += 1
+                        if b_data:
+                            st.info(
+                                f"ℹ️ Sheet '{sheet}' had no 'w'-prefixed headers — "
+                                f"auto-named {len(b_data)} numeric column(s) as "
+                                f"w1 … w{len(b_data)}. "
+                                f"Rename your sheet's header row to w1, w2, … to "
+                                f"control the labels.")
                     if b_data:
                         df_b = pd.DataFrame(b_data)
                         S["B"] = df_b
@@ -3356,14 +4264,20 @@ elif page == "🧩 Variable Inputs":
                             key="b_view_mode"
                         )
                         if _b_view.startswith("Rows"):
-                            # Transpose so each w-column becomes a numbered row
+                            # Transpose so each w-column becomes a row with w label on left
                             df_b_T = df_b.T.reset_index()
                             df_b_T.columns = ["w"] + [f"pos_{i+1}"
                                                        for i in range(df_b_T.shape[1]-1)]
+                            # Sort longest → shortest
+                            _pos_cols_b = [c for c in df_b_T.columns if c.startswith("pos_")]
+                            df_b_T["_len"] = df_b_T[_pos_cols_b].notna().sum(axis=1)
+                            df_b_T = df_b_T.sort_values("_len", ascending=False).drop(columns=["_len"]).reset_index(drop=True)
+                            # Add new_w as first column (renumbering after sort)
+                            df_b_T.insert(0, "new_w", [f"w{i+1}" for i in range(len(df_b_T))])
                             st.markdown(
                                 '<div class="info">ℹ️ B transposed — each row is one '
-                                'w-set; numbers run across columns (pos_1, pos_2, …). '
-                                'This is how B feeds the collation engine.</div>',
+                                'w-set. <b>new_w</b> = renumbered after longest→shortest sort. '
+                                '<b>w</b> = original name. Numbers run across to the right.</div>',
                                 unsafe_allow_html=True)
                             st.dataframe(df_b_T, use_container_width=True, height=280)
                             st.download_button("⬇ Download B_as_rows.csv",
@@ -3374,6 +4288,23 @@ elif page == "🧩 Variable Inputs":
                             st.download_button("⬇ Download B.csv",
                                                to_csv_bytes(df_b), "B.csv",
                                                "text/csv", key="dl_b_rules")
+
+                        # ── Renumbering table (always shown below) ────────────
+                        st.markdown("---")
+                        st.markdown("**🔢 B Renumbering — original → new position (longest → shortest)**")
+                        _b_renum = []
+                        _b_wcols_sorted = sorted(b_data.keys(),
+                                                  key=lambda k: len(b_data[k].dropna()),
+                                                  reverse=True)
+                        for _bi, _bwc in enumerate(_b_wcols_sorted):
+                            _b_renum.append({
+                                "new_w": f"w{_bi+1}",
+                                "old_w": _bwc,
+                                "numbers": int(len(b_data[_bwc].dropna())),
+                            })
+                        st.dataframe(pd.DataFrame(_b_renum),
+                                     use_container_width=True,
+                                     height=min(300, 40*len(_b_renum)+40))
                     else:
                         st.warning(f"Sheet '{sheet}' found but no numeric w-columns parsed.")
                 else:
@@ -3390,7 +4321,7 @@ elif page == "🧩 Variable Inputs":
                         unsafe_allow_html=True)
             up_b = st.file_uploader(
                 f"Upload {b_file} (or Base.xlsx / f_rules_Gclaude.xlsx)",
-                type=["xlsx"], key="up_b_rules")
+                type=_UPLOAD_TYPES, key="up_b_rules")
             if up_b:
                 # Save under both the game-specific name AND the legacy name
                 dest_game   = ROOT / b_file
@@ -3561,6 +4492,7 @@ elif page == "🧩 Variable Inputs":
                     S["D"] = df_d
                     st.success(f"✅ Loaded {len(df_d):,} rows from {_fp.name} "
                                f"(sorted longest → shortest)")
+                    _auto_wire_generators(_gdirs, _gkey)
 
             with c_loadall:
                 if st.button(
@@ -3586,6 +4518,7 @@ elif page == "🧩 Variable Inputs":
                         st.success(f"✅ Combined {len(dfs_all)} file(s) → "
                                    f"**{len(df_d_all):,} rows** · {len(df_d_all.columns)} cols "
                                    f"(sorted longest → shortest)")
+                        _auto_wire_generators(_gdirs, _gkey)
                     else:
                         st.error("No D files could be loaded.")
 
@@ -3626,11 +4559,42 @@ elif page == "🧩 Variable Inputs":
                     except Exception:
                         pass
 
-                st.write(f"**{len(df_d):,} rows · {len(df_d.columns)} cols**")
-                st.dataframe(df_d.head(40), use_container_width=True, height=300)
+                # ── Display in Excel-style row orientation ─────────────────
+                # w column on the left (w1, w2, w3… = one per syndicate row)
+                # Numbers run across: column headers 1, 2, 3… (number positions)
+                # Sorted longest pick → shortest, then re-numbered w1, w2…
+                _d_wcols_tab = [c for c in df_d.columns if re.match(r'^w\d+$', str(c), re.I)]
+
+                # Detect orientation: column-oriented = syndicates AS columns (few rows)
+                _d_col_orient = (len(_d_wcols_tab) > 0 and
+                                 len(df_d) < len(_d_wcols_tab) and
+                                 len(_d_wcols_tab) > 20)
+
+                if _d_col_orient:
+                    # Each column is a syndicate — transpose so each row = one syndicate
+                    _d_norm = df_d[_d_wcols_tab].T.reset_index(drop=True)
+                else:
+                    # Each row is already a syndicate — use w-columns only
+                    _d_norm = df_d[_d_wcols_tab].reset_index(drop=True) if _d_wcols_tab else df_d.reset_index(drop=True)
+
+                # Sort: longest pick (most non-null) first
+                _d_norm = _d_norm.apply(pd.to_numeric, errors="coerce")
+                _d_sort_key = _d_norm.notna().sum(axis=1)
+                _d_norm = _d_norm.loc[_d_sort_key.sort_values(ascending=False, kind="stable").index].reset_index(drop=True)
+
+                # Rename position columns 1, 2, 3…
+                _d_norm.columns = list(range(1, len(_d_norm.columns) + 1))
+                # Add w label column (renumbered after sort)
+                _d_norm.insert(0, "w", [f"w{i+1}" for i in range(len(_d_norm))])
+
+                n_syn = len(_d_norm)
+                n_pos = len(_d_norm.columns) - 1  # exclude 'w' column
+                st.write(f"**{n_syn:,} syndicates · up to {n_pos} number positions**")
+                st.dataframe(_d_norm, use_container_width=True,
+                             height=min(40 * min(n_syn, 200) + 60, 600))
                 st.download_button(
-                    f"⬇ Download D (current view) as CSV — {len(df_d):,} rows",
-                    to_csv_bytes(df_d),
+                    f"⬇ Download D (current view) as CSV — {n_syn:,} rows",
+                    to_csv_bytes(_d_norm),
                     f"D_{_gkey}_export.csv",
                     "text/csv",
                     key="dl_d_tab"
@@ -3641,108 +4605,78 @@ elif page == "🧩 Variable Inputs":
 
     # ── TAB: Ep (ExcelPro) ─────────────────────────────────────────────────
     with vtabs[3]:
-        st.markdown("**Ep — ExcelPro: top 8 w-columns of D → new w-sets**")
+        st.markdown("**Ep — ExcelPro** · objects a,b,c,d from D's 8 longest rows "
+                    "→ 6 pair blocks filtered through R's wt list")
+        st.markdown(
+            "Objects: **a** = D rows 1+2 (w1,w2) · **b** = rows 3+4 (w3,w4) · "
+            "**c** = rows 5+6 (w5,w6) · **d** = rows 7+8 (w7,w8). "
+            "wt list from R; falls back to unique numbers in D's top-8 rows if R not loaded. "
+            "Auto-runs when D loads — use button to re-run manually.")
 
-        # Load objects from B (the w-columns)
-        b_df = S.get("B", pd.DataFrame())
         d_df = S.get("D", pd.DataFrame())
+        r_df = S.get("R", pd.DataFrame())
 
-        if b_df.empty:
-            st.warning("Load B variable first (Base tab).")
-        elif d_df.empty:
-            st.warning("Load D variable first (Direct tab).")
+        if d_df.empty:
+            st.warning("Load D first (Direct tab).")
         else:
-            # Get all w-columns from D, sorted longest → shortest
-            w_cols_d = [c for c in d_df.columns
-                        if re.match(r'^w\d+$', c) or
-                        re.match(r'^n\d+$', c)]
-            if not w_cols_d:
-                # D from scraper — try to extract number columns
-                n_cols_d = sorted(
-                    [c for c in d_df.columns if re.match(r'^n\d+$', c, re.I)],
-                    key=lambda x: int(re.sub(r'\D', '', x) or 0))
-                if n_cols_d:
-                    w_cols_d = n_cols_d
+            wt_list_ep: list = []
+            if not r_df.empty:
+                _wt_col = next((c for c in ("wt", "all_wt") if c in r_df.columns), None)
+                if _wt_col:
+                    wt_list_ep = r_df[_wt_col].dropna().astype(int).tolist()
+            if not wt_list_ep:
+                _d_top8 = prepare_d_input_sets(d_df, 8)
+                wt_list_ep = sorted({int(v) for col in _d_top8.columns
+                                     for v in _d_top8[col].dropna()})
 
-            st.write(f"D has {len(w_cols_d)} w/n columns. "
-                     f"Top 8 will feed ExcelPro.")
+            st.write(f"wt list: **{len(wt_list_ep)} numbers** "
+                     f"({'from R' if wt_list_ep and not r_df.empty else 'from D fallback'})")
 
-            if len(w_cols_d) >= 1:
-                # Sort by column length descending
-                col_lens = {c: d_df[c].dropna().shape[0] for c in w_cols_d}
-                sorted_cols = sorted(col_lens, key=col_lens.get, reverse=True)
-                top8 = sorted_cols[:8]
-                st.write(f"Top 8 (longest→shortest): `{top8}`")
+            if st.button("▶ Run Ep", type="primary",
+                         key="run_ep_btn", use_container_width=True):
+                try:
+                    _ep_objs = prepare_ep_objects(d_df, mode="pairs")
+                    _ep_df   = generate_excelpro(_ep_objs, wt_list_ep)
+                    S["Ep"]  = _ep_df
+                    _ep_path = _gdirs["ExcelPro"] / f"Ep_{_gkey}.csv"
+                    _ep_df.to_csv(_ep_path, index=False)
+                    st.markdown(
+                        f'<div class="ok">✅ Ep: {_ep_df.shape[1]} cols → '
+                        f'{_ep_path.name}</div>',
+                        unsafe_allow_html=True)
+                except Exception as _ep_ex:
+                    st.error(f"Ep error: {_ep_ex}")
 
-                if st.button("▶ Run ExcelPro (Ep)", type="primary",
-                             key="run_ep", use_container_width=True):
-                    try:
-                        # Build objects from B w-columns (4 pairs)
-                        b_w_cols = [c for c in b_df.columns
-                                    if re.match(r'^w\d+$', c)]
-                        # Pair them: (w1,w2)=a, (w3,w4)=b, (w5,w6)=c, (w7,w8)=d
-                        objects_dict = {}
-                        pair_labels = ["a", "b", "c", "d"]
-                        for pi, label in enumerate(pair_labels):
-                            i1, i2 = pi * 2, pi * 2 + 1
-                            if i1 < len(b_w_cols):
-                                arr1 = b_df[b_w_cols[i1]].dropna().astype(int).tolist()
-                                arr2 = (b_df[b_w_cols[i2]].dropna().astype(int).tolist()
-                                        if i2 < len(b_w_cols) else [])
-                                objects_dict[label] = {
-                                    "title": label,
-                                    "sub1": f"{label}1",
-                                    "sub2": f"{label}2",
-                                    "arr1": arr1,
-                                    "arr2": arr2,
-                                }
+        ep_df_view = S.get("Ep", pd.DataFrame())
+        if not ep_df_view.empty:
+            st.markdown("**Ep output — row-oriented (one row per set):**")
+            st.dataframe(_sets_df_to_rows(ep_df_view, set_col="set"),
+                         use_container_width=True, height=380)
 
-                        # Build all_wt from top8 D columns
-                        d_nums = []
-                        seen_ep = set()
-                        for col in top8:
-                            for v in d_df[col].dropna():
-                                try:
-                                    n = int(float(v))
-                                    if n >= 1 and n not in seen_ep:
-                                        d_nums.append(n)
-                                        seen_ep.add(n)
-                                except Exception: pass
-
-                        if objects_dict and d_nums:
-                            from itertools import combinations as _ep_combos
-
-                            # Build all_wt from D numbers
-                            all_wt_ep = d_nums
-
-                            # Build occurrence matrix
-                            result_cols = {}
-                            for label, obj in objects_dict.items():
-                                set1 = set(obj["arr1"])
-                                set2 = set(obj["arr2"])
-                                lane_a = [n for n in all_wt_ep if n in set1]
-                                lane_b = [n for n in all_wt_ep if n in set2]
-                                result_cols[f"wt_{label}_1"] = pd.Series(lane_a)
-                                result_cols[f"wt_{label}_2"] = pd.Series(lane_b)
-
-                            ep_df = pd.DataFrame(result_cols)
-                            S["Ep"] = ep_df
-                            ep_path = _gdirs["ExcelPro"] / f"Ep_{_gkey}.csv"
-                            ep_df.to_csv(ep_path, index=False)
-                            st.markdown(
-                                f'<div class="ok">✅ Ep generated: {ep_df.shape[1]} columns '
-                                f'→ {ep_path.name}</div>',
-                                unsafe_allow_html=True)
-                            st.dataframe(ep_df.head(20),
-                                         use_container_width=True, height=280)
-                    except Exception as ex:
-                        st.error(f"ExcelPro error: {ex}")
-            else:
-                st.warning("D variable has no numeric columns to process.")
-
-        if not S.get("Ep", pd.DataFrame()).empty:
-            st.markdown("**Current Ep in memory:**")
-            st.dataframe(S["Ep"].head(10), use_container_width=True, height=180)
+            try:
+                import io as _ep_io
+                _ep_buf = _ep_io.BytesIO()
+                with pd.ExcelWriter(_ep_buf, engine="openpyxl") as _ep_xl:
+                    _sets_df_to_rows(ep_df_view, set_col="set").to_excel(
+                        _ep_xl, sheet_name="All", index=False)
+                    from itertools import combinations as _ep_combos2
+                    for _p in ["".join(p) for p in _ep_combos2(["a","b","c","d"], 2)]:
+                        _pcols = [c for c in ep_df_view.columns if c.endswith("_" + _p)]
+                        if _pcols:
+                            _pb = ep_df_view[_pcols].copy()
+                            _pb.columns = [c.split("_")[0] for c in _pcols]
+                            _sets_df_to_rows(_pb, set_col="obj").to_excel(
+                                _ep_xl, sheet_name=_p, index=False)
+                _ep_buf.seek(0)
+                st.download_button(
+                    label=f"⬇ Download Ep_{_gkey}.xlsx  (All + ab ac ad bc bd cd)",
+                    data=_ep_buf.getvalue(),
+                    file_name=f"Ep_{_gkey}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            except Exception as _ep_dl_ex:
+                st.warning(f"Excel export unavailable: {_ep_dl_ex}")
 
     # ── TAB: Sp (Splits) ───────────────────────────────────────────────────
     with vtabs[4]:
@@ -3854,9 +4788,46 @@ elif page == "🧩 Variable Inputs":
             else:
                 st.warning("Could not extract numeric data from D columns.")
 
-        if not S.get("Sp", pd.DataFrame()).empty:
-            st.markdown("**Current Sp in memory:**")
-            st.dataframe(S["Sp"].head(10), use_container_width=True, height=160)
+        sp_view = S.get("Sp", pd.DataFrame())
+        if not sp_view.empty:
+            st.markdown("**Current Sp in memory (row-oriented — one row per set):**")
+            st.dataframe(_sets_df_to_rows(sp_view, set_col="set"),
+                         use_container_width=True, height=380)
+
+            # ── Excel export: row-oriented, one sheet per group ──────────
+            st.markdown("#### Download as Excel (one sheet per set group, row-oriented)")
+            try:
+                import io as _sp_io
+                _sp_buf = _sp_io.BytesIO()
+                with pd.ExcelWriter(_sp_buf, engine="openpyxl") as _sp_writer:
+                    # Sheet "All" — full row-oriented table
+                    _sets_df_to_rows(sp_view, set_col="set").to_excel(
+                        _sp_writer, sheet_name="All", index=False)
+                    # Group columns by prefix, then export each group row-oriented
+                    _sp_groups = {
+                        "Splits_w":      [c for c in sp_view.columns
+                                          if re.match(r'^w\d+[01]$', str(c))],
+                        "Complements_y": [c for c in sp_view.columns
+                                          if re.match(r'^y\d+$', str(c))],
+                        "Combo3_efgh":   [c for c in sp_view.columns
+                                          if re.match(r'^[efgh]\d+$', str(c))],
+                        "Combo2_ijklmn": [c for c in sp_view.columns
+                                          if re.match(r'^[ijklmn]\d+$', str(c))],
+                    }
+                    for _sheet, _cols in _sp_groups.items():
+                        if _cols:
+                            _sets_df_to_rows(sp_view[_cols], set_col="set").to_excel(
+                                _sp_writer, sheet_name=_sheet, index=False)
+                _sp_buf.seek(0)
+                st.download_button(
+                    label=f"⬇ Download Sp_{_gkey}.xlsx (All + 4 group sheets)",
+                    data=_sp_buf.getvalue(),
+                    file_name=f"Sp_{_gkey}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            except Exception as _sp_dl_ex:
+                st.warning(f"Excel export unavailable: {_sp_dl_ex}")
 
     # ── TAB: So (SplitsCombi) ──────────────────────────────────────────────
     with vtabs[5]:
@@ -3911,36 +4882,52 @@ elif page == "🧩 Variable Inputs":
                         universe_so = set(
                             n for v in sets_ready_so.values() for n in v)
 
-                        comb_pairs = {
-                            str(elem): set(split_sets_so[elem[0]]).union(
-                                set(split_sets_so[elem[1]]))
-                            for elem in _so_combos(split_sets_so, 2)
-                        }
-                        comb_three = {
-                            str(elem): set(sets_ready_so[elem[0]]).union(
-                                set(sets_ready_so[elem[1]]),
-                                set(sets_ready_so[elem[2]]))
-                            for elem in _so_combos(keys_so, 3)
-                        }
+                        # Build pair/triple dicts; store actual tuples separately so
+                        # membership check can use proper key extraction instead of
+                        # fragile string-index tricks (which broke with multi-char
+                        # keys like w1,w2,w3,w4).
+                        _pair_tuples = list(_so_combos(list(split_sets_so.keys()), 2))
+                        _triple_tuples = list(_so_combos(keys_so, 3))
+
+                        comb_pairs = {}
+                        _pair_map: dict = {}   # str(tuple) → actual tuple
+                        for _pt in _pair_tuples:
+                            _k = str(_pt)
+                            comb_pairs[_k] = set(split_sets_so[_pt[0]]).union(
+                                set(split_sets_so[_pt[1]]))
+                            _pair_map[_k] = _pt
+
+                        comb_three = {}
+                        _triple_map: dict = {}
+                        for _tt in _triple_tuples:
+                            _k = str(_tt)
+                            comb_three[_k] = set(sets_ready_so[_tt[0]]).union(
+                                set(sets_ready_so[_tt[1]]),
+                                set(sets_ready_so[_tt[2]]))
+                            _triple_map[_k] = _tt
 
                         result_so: dict = {}
                         result_so["U"] = universe_so
 
-                        for set_i in comb_three:
-                            for set_j in comb_pairs:
-                                if (comb_pairs[set_j].issubset(comb_three[set_i])
-                                        and set_j[2] in set_i
-                                        and set_j[8] in set_i):
+                        for set_i, tset in comb_three.items():
+                            triple_base_keys = set(_triple_map[set_i])
+                            for set_j, pset in comb_pairs.items():
+                                # Extract base key by stripping trailing "0"/"1" suffix.
+                                # Works for any key length: 'w10'→'w1', 'a0'→'a'.
+                                _pair_t = _pair_map[set_j]
+                                base0 = _pair_t[0][:-1]
+                                base1 = _pair_t[1][:-1]
+                                if (pset.issubset(tset)
+                                        and base0 in triple_base_keys
+                                        and base1 in triple_base_keys):
                                     result_so[f"U-{set_i}-{set_j}"] = \
-                                        universe_so - (comb_three[set_i] -
-                                                       comb_pairs[set_j])
-                                    result_so[f"{set_i}-{set_j}"] = \
-                                        comb_three[set_i] - comb_pairs[set_j]
-                            result_so[str(set_i)] = comb_three[set_i]
+                                        universe_so - (tset - pset)
+                                    result_so[f"{set_i}-{set_j}"] = tset - pset
+                            result_so[str(set_i)] = tset
 
-                        for set_j in comb_pairs:
-                            result_so[f"U-{set_j}"] = universe_so - comb_pairs[set_j]
-                            result_so[str(set_j)] = comb_pairs[set_j]
+                        for set_j, pset in comb_pairs.items():
+                            result_so[f"U-{set_j}"] = universe_so - pset
+                            result_so[str(set_j)] = pset
 
                         so_df = pd.DataFrame(
                             {k: pd.Series(list(v)) for k, v in result_so.items()})
@@ -3962,9 +4949,60 @@ elif page == "🧩 Variable Inputs":
             else:
                 st.warning("Could not extract numeric data from D columns.")
 
-        if not S.get("So", pd.DataFrame()).empty:
-            st.markdown("**Current So in memory:**")
-            st.dataframe(S["So"].head(10), use_container_width=True, height=160)
+        so_view = S.get("So", pd.DataFrame())
+        if not so_view.empty:
+            st.markdown("**Current So in memory (row-oriented — one row per set):**")
+            st.dataframe(_sets_df_to_rows(so_view, set_col="set"),
+                         use_container_width=True, height=380)
+
+            # ── Excel export: row-oriented, one sheet per combination type
+            st.markdown("#### Download as Excel (one sheet per combination type, row-oriented)")
+            try:
+                import io as _so_io
+                _so_buf = _so_io.BytesIO()
+
+                def _so_group(col: str) -> str:
+                    """Classify a So column name into its combination category."""
+                    c = str(col)
+                    if c == "U":
+                        return "Universe"
+                    if c.startswith("U-") and c.count("(") >= 2:
+                        return "U_minus_triple_pair"
+                    if not c.startswith("U-") and c.count("(") >= 2:
+                        return "Triple_minus_pair"
+                    if c.count("(") == 1 and "," in c and c.count(",") >= 2:
+                        return "Triples"
+                    if c.startswith("U-"):
+                        return "U_minus_pair"
+                    return "Pairs"
+
+                from collections import defaultdict as _sodd
+                _so_groups: dict = _sodd(list)
+                for _c in so_view.columns:
+                    _so_groups[_so_group(_c)].append(_c)
+
+                with pd.ExcelWriter(_so_buf, engine="openpyxl") as _so_writer:
+                    # Sheet "All" — full row-oriented table
+                    _sets_df_to_rows(so_view, set_col="set").to_excel(
+                        _so_writer, sheet_name="All", index=False)
+                    _sheet_order = ["Universe", "Triples", "Triple_minus_pair",
+                                    "U_minus_triple_pair", "Pairs", "U_minus_pair"]
+                    for _sh in _sheet_order:
+                        _cols = _so_groups.get(_sh, [])
+                        if _cols:
+                            _sets_df_to_rows(so_view[_cols], set_col="set").to_excel(
+                                _so_writer, sheet_name=_sh[:31], index=False)
+
+                _so_buf.seek(0)
+                st.download_button(
+                    label=f"⬇ Download So_{_gkey}.xlsx (All + 6 type sheets)",
+                    data=_so_buf.getvalue(),
+                    file_name=f"So_{_gkey}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            except Exception as _so_dl_ex:
+                st.warning(f"Excel export unavailable: {_so_dl_ex}")
 
     # ── TAB: Since Last ────────────────────────────────────────────────────
     with vtabs[6]:
@@ -4026,13 +5064,11 @@ elif page == "🧩 Variable Inputs":
         st.markdown("---")
         st.markdown("**Manual upload** (paste from lottolyzer CSV export):")
         up_sl = st.file_uploader(
-            "Upload Since Last CSV (columns: Number, Since Last)",
-            type=["csv", "xlsx"], key="up_sl")
+            "Upload Since Last file (columns: Number, Since Last) — CSV, Excel, …",
+            type=_UPLOAD_TYPES, key="up_sl")
         if up_sl:
             try:
-                df_sl = (pd.read_excel(up_sl, engine="openpyxl")
-                         if up_sl.name.endswith(".xlsx")
-                         else pd.read_csv(up_sl))
+                df_sl = _read_uploaded(up_sl)
                 # Find Since Last column
                 sl_col = next((c for c in df_sl.columns
                                if "since" in c.lower()), None)
@@ -4143,13 +5179,65 @@ elif page == "📦 Container Formula":
                     f'(load these in Variable Inputs, or Build W-Matrix for D)</div>',
                     unsafe_allow_html=True)
 
+    # ── JOIN DEMO: show how variables stack BEFORE running collation ─────
+    with st.expander("🔍 Collation Join Preview — see exactly how variables stack", expanded=False):
+        st.markdown(
+            '<div class="info"><b>Rule:</b> B rows come first (all of them), then R rows '
+            '(if loaded), then D rows underneath. Each block is separated by a divider. '
+            'Numbers fill across columns w1, w2, … matching the widest row.</div>',
+            unsafe_allow_html=True)
+
+        _demo_pieces = []
+        _demo_summary = []
+        for _dv in base_needed:
+            _df_dv = S.get(_dv)
+            if _df_dv is None or (isinstance(_df_dv, pd.DataFrame) and _df_dv.empty):
+                continue
+            _block = _to_w_rows(_df_dv, is_direct=(_dv == "D"))
+            if _block is None or _block.empty:
+                continue
+            _block = _block.copy()
+            _block.columns = [f"w{i+1}" for i in range(len(_block.columns))]
+            _block.insert(0, "Source", _dv)
+            _demo_pieces.append(_block)
+            _demo_summary.append({"Variable": _dv, "Rows": f"{len(_block):,}",
+                                   "Widest pick": len(_block.columns) - 1})
+
+        if _demo_summary:
+            st.markdown("**Block sizes — in stacking order:**")
+            _sum_df = pd.DataFrame(_demo_summary)
+            _sum_df["Cumulative rows"] = _sum_df["Rows"].str.replace(",","").astype(int).cumsum().apply(lambda x: f"{x:,}")
+            st.dataframe(_sum_df, use_container_width=True, hide_index=True)
+
+            for _pi, _piece in enumerate(_demo_pieces):
+                _var_name = _piece["Source"].iloc[0]
+                _n_rows = len(_piece)
+                _preview_n = min(8, _n_rows)
+                st.markdown(
+                    f'<div class="ok" style="margin-top:10px">▶ <b>{_var_name}</b> block — '
+                    f'{_n_rows:,} row{"s" if _n_rows!=1 else ""} '
+                    f'(showing first {_preview_n})</div>',
+                    unsafe_allow_html=True)
+                st.dataframe(_piece.head(_preview_n), use_container_width=True,
+                             height=min(120 + _preview_n * 35, 340))
+                if _pi < len(_demo_pieces) - 1:
+                    _next_var = _demo_pieces[_pi+1]["Source"].iloc[0]
+                    st.markdown(
+                        f'<div class="note" style="text-align:center;font-size:.85rem">'
+                        f'⬇ {_next_var} rows continue below this point</div>',
+                        unsafe_allow_html=True)
+        else:
+            st.info("Load variables in Variable Inputs first to preview the join.")
+
+    st.markdown("---")
+
     if st.button(f"▶ Collate {chosen_f}", type="primary", use_container_width=True):
         with st.spinner("Collating…"):
             result = execute_collation(comps)
         if result.empty:
             st.error("Result empty — load components in Variable Inputs first.")
         else:
-            out = DIRS["CVI"] / f"CVI_{chosen_f}.csv"
+            out = _gdirs["CVI"] / f"CVI_{chosen_f}.csv"
             result.to_csv(out, index=False)
             S["cvi"][chosen_f] = result
             n_wcols = sum(1 for c in result.columns if str(c).startswith("w"))
@@ -4157,8 +5245,19 @@ elif page == "📦 Container Formula":
                         f'(w-sets) × {n_wcols} number columns (w1…w{n_wcols}) '
                         f'→ <code>{out.name}</code></div>',
                         unsafe_allow_html=True)
-            # Tall result (hundreds of thousands of rows) — show only a small slice;
-            # full matrix is saved to disk and available via the download button.
+
+            # ── Stacked result — show each variable's block clearly ───────
+            _res_sources = result["Source"].unique().tolist() if "Source" in result.columns else []
+            if _res_sources:
+                st.markdown("**Result breakdown by variable block:**")
+                _blk_rows = []
+                for _src in _res_sources:
+                    _blk = result[result["Source"] == _src]
+                    _blk_rows.append({"Variable": _src,
+                                      "Rows": f"{len(_blk):,}",
+                                      "Starts at row": f"{result[result['Source']==_src].index[0]+1:,}"})
+                st.dataframe(pd.DataFrame(_blk_rows), use_container_width=True, hide_index=True)
+
             n_show_c = min(60, result.shape[1])
             n_show_r = min(50, result.shape[0])
             if result.shape[0] > n_show_r:
@@ -4256,15 +5355,15 @@ elif page == "🖥️ Container Dashboards":
     )
 
     if run_all_btn and main_choice and matching_cvi:
-        main_path  = DIRS["Main_Data"] / main_choice
-        output_dir = DIRS["Outputs"] / f"Cluster_{next_id}_{cluster_label}"
+        main_path  = _gdirs["Main_Data"] / main_choice
+        output_dir = _gdirs["Outputs"] / f"Cluster_{next_id}_{cluster_label}"
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Build worker args
         worker_args = []
         for cvi_info in matching_cvi:
             formula = cvi_info["formula"]
-            sc_path = DIRS["Selected_Counts"] / f"SC_{formula}.csv"
+            sc_path = _gdirs["Selected_Counts"] / f"SC_{formula}.csv"
             worker_args.append((
                 formula,
                 cvi_info["path"],
@@ -4342,7 +5441,7 @@ elif page == "🖥️ Container Dashboards":
     st.markdown("**Individual dashboard (open one at a time):**")
     # Build list from all CVI files + hardcoded defaults
     cvi_found = [parse_cvi_filename(f.name)["formula"]
-                 for f in sorted(DIRS["CVI"].glob("CVI_*.csv"))]
+                 for f in sorted(_gdirs["CVI"].glob("CVI_*.csv"))]
     all_db_names = list(dict.fromkeys(
         [f"1n & {f}" for f in cvi_found] + DASHBOARDS
     ))
@@ -4367,13 +5466,13 @@ elif page == "🖥️ Container Dashboards":
     cvi_df = S["cvi"].get(formula_name)
     if cvi_df is None:
         # Try all CVI files for this formula (any lotto type, any date)
-        for cvi_fp in sorted(DIRS["CVI"].glob(f"CVI_*{formula_name}*.csv")):
+        for cvi_fp in sorted(_gdirs["CVI"].glob(f"CVI_*{formula_name}*.csv")):
             cvi_df = _load_file(cvi_fp)
             if not cvi_df.empty:
                 S["cvi"][formula_name] = cvi_df
                 break
         if cvi_df is None:
-            for search_dir in [DIRS["CVI"], DIRS["Rainbow"]]:
+            for search_dir in [_gdirs["CVI"], _gdirs["Rainbow"]]:
                 cvi_path = search_dir / f"CVI_{formula_name}.csv"
                 if cvi_path.exists():
                     cvi_df = _load_file(cvi_path)
@@ -4383,7 +5482,7 @@ elif page == "🖥️ Container Dashboards":
 
     # ── Auto-load SC ───────────────────────────────────────────────────────
     sc_auto = {}
-    sc_folder = DIRS["Selected_Counts"]
+    sc_folder = _gdirs["Selected_Counts"]
     for sc_file in (sorted(sc_folder.glob(f"SC_{formula_name}*.csv")) +
                     sorted(sc_folder.glob(f"SC_{formula_name}*.xlsx"))):
         try:
@@ -4424,11 +5523,12 @@ elif page == "🖥️ Container Dashboards":
         else:
             st.warning("⚠️ SC not loaded")
             up_sc = st.file_uploader(
-                "Upload SC (cols: w, Selected Count)", type=["csv"],
+                "Upload SC (cols: w, Selected Count) — CSV, Excel, …",
+                type=_UPLOAD_TYPES,
                 key="dash_sc_upload", label_visibility="collapsed")
             if up_sc is not None:
                 try:
-                    df_up = pd.read_csv(up_sc)
+                    df_up = _read_uploaded(up_sc)
                     if "w" in df_up.columns and "Selected Count" in df_up.columns:
                         sc_folder.mkdir(parents=True, exist_ok=True)
                         dest = sc_folder / f"SC_{formula_name}.csv"
@@ -4501,7 +5601,7 @@ elif page == "🖥️ Container Dashboards":
                          use_container_width=True):
                 S["cvi"].pop(formula_name, None)
                 # Remove from disk so it won't auto-reload
-                cvi_path = DIRS["CVI"] / f"CVI_{formula_name}.csv"
+                cvi_path = _gdirs["CVI"] / f"CVI_{formula_name}.csv"
                 if cvi_path.exists():
                     cvi_path.unlink()
                 cvi_df = pd.DataFrame()
@@ -4512,13 +5612,12 @@ elif page == "🖥️ Container Dashboards":
         # Upload always visible — key uses a counter so it resets after clear
         upload_key_cvi = f"up_cvi_{db}_{S.get('cvi_upload_v', {}).get(db, 0)}"
         up_cvi = st.file_uploader(
-            "Upload CVI file (csv/xlsx):",
-            type=["csv","xlsx"], key=upload_key_cvi
+            "Upload CVI file (CSV, Excel, HTML, JSON, …):",
+            type=_UPLOAD_TYPES, key=upload_key_cvi
         )
         if up_cvi:
-            df_cvi_up = pd.read_csv(up_cvi) if up_cvi.name.endswith(".csv") \
-                        else pd.read_excel(up_cvi)
-            cvi_save = DIRS["CVI"] / f"CVI_{formula_name}.csv"
+            df_cvi_up = _read_uploaded(up_cvi)
+            cvi_save = _gdirs["CVI"] / f"CVI_{formula_name}.csv"
             df_cvi_up.to_csv(cvi_save, index=False)
             S["cvi"][formula_name] = df_cvi_up
             # Bump version so key resets next time Replace is clicked
@@ -4544,12 +5643,11 @@ elif page == "🖥️ Container Dashboards":
 
         upload_key_md = f"up_md_{db}_{S.get('md_upload_v', {}).get(db, 0)}"
         up_md = st.file_uploader(
-            "Upload Main Data file (csv/xlsx):",
-            type=["csv","xlsx"], key=upload_key_md
+            "Upload Main Data file (CSV, Excel, HTML, JSON, …):",
+            type=_UPLOAD_TYPES, key=upload_key_md
         )
         if up_md:
-            df_md_up = pd.read_csv(up_md) if up_md.name.endswith(".csv") \
-                       else pd.read_excel(up_md)
+            df_md_up = _read_uploaded(up_md)
             for col in df_md_up.columns:
                 df_md_up[col] = pd.to_numeric(df_md_up[col], errors="coerce")
             S["main_data"] = df_md_up
@@ -4576,12 +5674,11 @@ elif page == "🖥️ Container Dashboards":
     with st.expander("📂 Upload / Replace Selected Count file"):
         st.caption("File must have columns: w, Selected Count")
         upload_key_sc = f"up_sc_{db}_{S.get('sc_upload_v', {}).get(db, 0)}"
-        up_sc = st.file_uploader("Upload SC file", type=["csv","xlsx"],
-                                  key=upload_key_sc)
+        up_sc = st.file_uploader("Upload SC file (CSV, Excel, HTML, JSON, …)",
+                                  type=_UPLOAD_TYPES, key=upload_key_sc)
         if up_sc:
-            df_sc_up = pd.read_csv(up_sc) if up_sc.name.endswith(".csv") \
-                       else pd.read_excel(up_sc)
-            sp_sc = DIRS["Selected_Counts"] / f"SC_{formula_name}.csv"
+            df_sc_up = _read_uploaded(up_sc)
+            sp_sc = _gdirs["Selected_Counts"] / f"SC_{formula_name}.csv"
             df_sc_up.to_csv(sp_sc, index=False)
             if "sc_upload_v" not in S: S["sc_upload_v"] = {}
             S["sc_upload_v"][db] = S["sc_upload_v"].get(db, 0) + 1
@@ -4645,32 +5742,55 @@ elif page == "🖥️ Container Dashboards":
         key=lambda x: int(x[1:])
     )
 
-    # Global toggle
-    g1, g2, _ = st.columns([1, 1, 6])
-    with g1:
-        if st.button("🌐 All → U", key=f"gall_u_{db}", use_container_width=True):
+    # ── Compact carry-forward control ─────────────────────────────────────
+    # Global default + per-row overrides via a single editable table.
+    # No per-column button grid — works cleanly with any number of w-columns.
+    gd1, gd2, gd3 = st.columns([1.5, 1.5, 5])
+    with gd1:
+        global_dir = st.selectbox(
+            "Default direction:",
+            ["U — Unselected", "S — Selected"],
+            key=f"gdir_{db}",
+            help="Sets carry-forward direction for ALL rows at once."
+        )
+        _gd = "U" if global_dir.startswith("U") else "S"
+    with gd2:
+        if st.button("Apply to all", key=f"gdir_apply_{db}",
+                     use_container_width=True):
             for wk in w_keys_cf:
-                S[cf_key][wk] = "U"
-    with g2:
-        if st.button("🌐 All → S", key=f"gall_s_{db}", use_container_width=True):
-            for wk in w_keys_cf:
-                S[cf_key][wk] = "S"
+                S[cf_key][wk] = _gd
+            st.rerun()
+    with gd3:
+        st.caption(
+            f"{len(w_keys_cf)} w-columns loaded. "
+            "Edit the Direction column in the table below to override individual rows. "
+            "U = Unselected carries forward · S = Selected carries forward."
+        )
 
-    # Per-row toggles
     if w_keys_cf:
-        row_cols = st.columns(len(w_keys_cf))
-        for i, wk in enumerate(w_keys_cf):
-            cur = S[cf_key].get(wk, "U")
-            with row_cols[i]:
-                st.caption(wk)
-                if st.button(
-                    f"{'🔵 U' if cur=='U' else '🟢 S'}",
-                    key=f"cf_{db}_{wk}",
-                    use_container_width=True,
-                    help=f"{wk}: currently carrying {'Unselected' if cur=='U' else 'Selected'} forward"
-                ):
-                    S[cf_key][wk] = "S" if cur == "U" else "U"
-                    st.rerun()
+        # Build override table: one row per w-column
+        _cf_rows = [{"Row": f"Row {int(wk[1:])}  ·  {wk}",
+                     "Direction": S[cf_key].get(wk, "U")}
+                    for wk in w_keys_cf]
+        _cf_edit_df = pd.DataFrame(_cf_rows)
+        _cf_edited = st.data_editor(
+            _cf_edit_df,
+            key=f"cf_tbl_{db}",
+            use_container_width=True,
+            num_rows="fixed",
+            height=min(40 * len(w_keys_cf) + 50, 340),
+            column_config={
+                "Row":       st.column_config.TextColumn("Row", disabled=True,
+                                                          width="medium"),
+                "Direction": st.column_config.SelectboxColumn(
+                                 "Direction", options=["U", "S"], width="small"),
+            },
+            hide_index=True,
+        )
+        # Persist edits back into session state
+        for _idx, _row in _cf_edited.iterrows():
+            _wk = w_keys_cf[_idx]
+            S[cf_key][_wk] = _row["Direction"]
 
     # Build final carry_fwd dict (defaults to U)
     carry_fwd = {wk: S[cf_key].get(wk, "U") for wk in w_keys_cf}
@@ -4810,50 +5930,276 @@ elif page == "🖥️ Container Dashboards":
                              height=min(40*len(df_show)+50, 340),
                              hide_index=True)
 
-        # ── Compact summary table ──────────────────────────────────────
+        # ── Interactive Matching Table — per-cell popover detail ──────
         st.markdown("#### Matching Table")
         if not fig9.empty:
-            # Rename index to start from 1
-            fig9_disp = fig9.copy()
-            fig9_disp.index = range(1, len(fig9_disp)+1)
-            st.dataframe(fig9_disp, use_container_width=True, height=310)
-            c_dl1, c_dl2 = st.columns(2)
-            with c_dl1:
-                st.download_button("⬇ Matching Table CSV",
-                                   to_csv_bytes(fig9),
-                                   f"{ind_prefix}_matching_table.csv",
-                                   "text/csv", key=f"dl_fig9_{db}")
+            _dbg_by_w = {d["w"]: d for d in dbg}
 
-        # ── Inline expanders — one per w-column ───────────────────────
-        for i, d in enumerate(dbg):
-            w_lbl    = d["w"]
+            # Column config: (header label, relative width)
+            _MT = [
+                ("Row",        1.5), ("M",          1.2), ("CVI",       1.0),
+                ("Dir",        0.6), ("Main Ct",    2.5), ("Main Bkdn", 3.5),
+                ("Present",    1.2), ("Pres Ct",    2.5), ("SC",        0.8),
+                ("Selected",   1.2), ("Sel Bkdn",   3.5),
+                ("Unsel Ct",   1.2), ("Unselected", 1.2), ("Unsel Bkdn",3.5),
+            ]
+            _widths = [c[1] for c in _MT]
+
+            # Header row
+            _hdrs = st.columns(_widths)
+            for _hc, (_hn, _) in zip(_hdrs, _MT):
+                _hc.markdown(f"<small><b>{_hn}</b></small>",
+                             unsafe_allow_html=True)
+            st.divider()
+
+            def _trunc(s, n=16):
+                s = str(s)
+                return (s[:n] + "…") if len(s) > n else s
+
+            for _ri, _fr in fig9.reset_index(drop=True).iterrows():
+                _w       = _fr["CVI"]
+                _d       = _dbg_by_w.get(_w, {})
+                _cvi_set = _d.get("cvi_set", set())
+                _sc_set  = set(_d.get("sc", []))
+                _rc      = st.columns(_widths)
+
+                # 0 · Row — plain
+                _rc[0].write(_fr["Row"])
+
+                # 1 · M:29 — popover → main data table
+                _fr_main_data = _fr["Main\nData"]
+                with _rc[1].popover(_fr_main_data,
+                                    use_container_width=True):
+                    st.markdown(f"**Main Data — {_fr_main_data}**")
+                    _md_wc = _d.get("main_df_wc")
+                    if _md_wc is not None and not _md_wc.empty:
+                        st.dataframe(_md_wc.head(300),
+                                     use_container_width=True, height=280)
+                    else:
+                        st.info("Full data not stored "
+                                "(M > threshold or no CVI).")
+
+                # 2 · CVI (w1…) — popover → CVI numbers list
+                with _rc[2].popover(_fr["CVI"],
+                                    use_container_width=True):
+                    st.markdown(f"**CVI numbers for {_w}** "
+                                f"({len(_cvi_set)} values):")
+                    st.write(sorted(_cvi_set) if _cvi_set else "— None —")
+
+                # 3 · Dir — plain
+                _rc[3].write(_fr["Dir"])
+
+                # 4 · Main Count — popover → full count string
+                with _rc[4].popover(_trunc(_fr["Main\nCount"]),
+                                    use_container_width=True):
+                    st.markdown("**Main Count distribution:**")
+                    st.write(str(_fr["Main\nCount"]))
+
+                # 5 · Main Breakdown — popover → breakdown + dist table
+                with _rc[5].popover(_trunc(_fr["Main\nBreakdown"]),
+                                    use_container_width=True):
+                    st.markdown("**Main Breakdown:**")
+                    st.write(str(_fr["Main\nBreakdown"]))
+                    _cd = _d.get("count_dist", {})
+                    if _cd:
+                        st.dataframe(pd.DataFrame([
+                            {"Count": int(k[1:]), "Rows": v,
+                             "Status": "✅ Sel" if int(k[1:]) in _sc_set
+                                       else "— Unsel"}
+                            for k, v in sorted(_cd.items())
+                        ]), hide_index=True, use_container_width=True)
+
+                # 6 · Present Data — popover → row count entering stage
+                _fr_present_data = _fr["Present\nData"]
+                with _rc[6].popover(_fr_present_data,
+                                    use_container_width=True):
+                    st.markdown(f"**Present at this stage:** "
+                                f"{_fr_present_data}")
+                    st.write(f"Rows entering: "
+                             f"{_d.get('present_in', '—')}")
+
+                # 7 · Present Count — popover → count breakdown string
+                with _rc[7].popover(_trunc(_fr["Present\nCount"]),
+                                    use_container_width=True):
+                    st.markdown("**Present Count distribution:**")
+                    st.write(_d.get("pres_count_str",
+                                    str(_fr["Present\nCount"])))
+
+                # 8 · SC — plain
+                _rc[8].write(_fr["SC"])
+
+                # 9 · Selected — popover → sel_df table + CSV download
+                with _rc[9].popover(_fr["Selected"],
+                                    use_container_width=True):
+                    st.markdown(f"**Selected rows — {_fr['Selected']}**")
+                    _sel_df_p = _d.get("sel_df")
+                    if _sel_df_p is not None and not _sel_df_p.empty:
+                        st.dataframe(_sel_df_p.head(300),
+                                     use_container_width=True, height=280)
+                        st.download_button(
+                            f"⬇ {_w} Selected CSV",
+                            to_csv_bytes(_sel_df_p),
+                            f"{ind_prefix}_{_w}_sel.csv",
+                            "text/csv",
+                            key=f"pop_sel_{db}_{_ri}",
+                        )
+                    elif _d.get("selected_n", 0) == 0:
+                        st.info("No rows selected at this stage.")
+                    else:
+                        st.info(f"S:{_d['selected_n']} — not stored "
+                                f"(M > {DISPLAY_THRESHOLD:,})")
+
+                # 10 · Sel Breakdown — popover → breakdown text
+                with _rc[10].popover(_trunc(_fr["Sel\nBreakdown"]),
+                                     use_container_width=True):
+                    st.markdown("**Selected Breakdown:**")
+                    st.write(str(_fr["Sel\nBreakdown"]))
+
+                # 11 · Unsel Count — popover → unsel count string
+                with _rc[11].popover(_trunc(_fr["Unsel\nCount"]),
+                                     use_container_width=True):
+                    st.markdown("**Unselected Count distribution:**")
+                    st.write(str(_fr["Unsel\nCount"]))
+
+                # 12 · Unselected — popover → unsel_df table + CSV download
+                with _rc[12].popover(_fr["Unselected"],
+                                     use_container_width=True):
+                    st.markdown(f"**Unselected rows — {_fr['Unselected']}**")
+                    _unsel_df_p = _d.get("unsel_df")
+                    if _unsel_df_p is not None and not _unsel_df_p.empty:
+                        st.dataframe(_unsel_df_p.head(300),
+                                     use_container_width=True, height=280)
+                        st.download_button(
+                            f"⬇ {_w} Unselected CSV",
+                            to_csv_bytes(_unsel_df_p),
+                            f"{ind_prefix}_{_w}_unsel.csv",
+                            "text/csv",
+                            key=f"pop_unsel_{db}_{_ri}",
+                        )
+                    elif _d.get("unselected_n", 0) == 0:
+                        st.info("No unselected rows remaining.")
+                    else:
+                        st.info(f"U:{_d['unselected_n']} — not stored "
+                                f"(M > {DISPLAY_THRESHOLD:,})")
+
+                # 13 · Unsel Breakdown — popover → breakdown text
+                with _rc[13].popover(_trunc(_fr["Unsel\nBreakdown"]),
+                                     use_container_width=True):
+                    st.markdown("**Unselected Breakdown:**")
+                    st.write(str(_fr["Unsel\nBreakdown"]))
+
+            # Download the full table as CSV
+            st.download_button("⬇ Matching Table CSV",
+                               to_csv_bytes(fig9),
+                               f"{ind_prefix}_matching_table.csv",
+                               "text/csv", key=f"dl_fig9_{db}")
+
+        # ── Per-row summary table + single-row inspector ──────────────
+        # Show all rows as a compact summary table first, then let the
+        # user pick ONE row to drill into — avoids rendering hundreds of
+        # expanders at once.
+        st.markdown("#### Row-by-Row Summary")
+        _summary_rows = []
+        for _d in dbg:
+            _icon = "✅" if _d["selected_n"] > 0 else (
+                    "⚪" if _d["present_in"] == 0 else "🔵")
+            _note = f"  ⚠️{_d.get('note','')}" if _d.get("note") else ""
+            _summary_rows.append({
+                "":        _icon,
+                "Row":     int(_d["w"][1:]),
+                "w":       _d["w"],
+                "Dir":     _d.get("direction", "U"),
+                "Present": _d["present_in"],
+                "SC":      str(list(_d["sc"])),
+                "S":       _d["selected_n"],
+                "U":       _d["unselected_n"],
+                "Note":    _note.strip(),
+            })
+        if _summary_rows:
+            _sum_df = pd.DataFrame(_summary_rows)
+            st.dataframe(_sum_df, use_container_width=True,
+                         hide_index=True,
+                         height=min(40 * len(_sum_df) + 50, 340))
+
+            # ── One-click export of the full summary ───────────────────
+            _bdl1, _bdl2 = st.columns(2)
+            with _bdl1:
+                st.download_button(
+                    "⬇ Download Row Summary CSV",
+                    to_csv_bytes(_sum_df.drop(columns=[""])),
+                    f"{ind_prefix}_row_summary.csv",
+                    "text/csv",
+                    key=f"dl_sum_csv_{db}",
+                    use_container_width=True,
+                )
+            with _bdl2:
+                try:
+                    import io as _sum_io
+                    _sum_buf = _sum_io.BytesIO()
+                    with pd.ExcelWriter(_sum_buf, engine="openpyxl") as _sum_xl:
+                        _export_df = _sum_df.drop(columns=[""]).copy()
+                        _export_df.to_excel(_sum_xl, sheet_name="Row_Summary",
+                                            index=False)
+                        # Conditional formatting: green S>0, grey S=0
+                        from openpyxl.styles import PatternFill as _PF, Font as _Fnt
+                        _ws = _sum_xl.sheets["Row_Summary"]
+                        _green = _PF("solid", fgColor="C6EFCE")
+                        _red   = _PF("solid", fgColor="FFC7CE")
+                        _s_col = list(_export_df.columns).index("S") + 1
+                        _u_col = list(_export_df.columns).index("U") + 1
+                        for _r in range(2, len(_export_df) + 2):
+                            _sc = _ws.cell(row=_r, column=_s_col)
+                            _uc = _ws.cell(row=_r, column=_u_col)
+                            try:
+                                if int(_sc.value or 0) > 0:
+                                    _sc.fill = _green
+                                else:
+                                    _sc.fill = _red
+                            except (ValueError, TypeError):
+                                pass
+                    _sum_buf.seek(0)
+                    st.download_button(
+                        "⬇ Download Row Summary Excel (S highlighted)",
+                        _sum_buf.getvalue(),
+                        f"{ind_prefix}_row_summary.xlsx",
+                        "application/vnd.openxmlformats-officedocument"
+                        ".spreadsheetml.sheet",
+                        key=f"dl_sum_xl_{db}",
+                        use_container_width=True,
+                    )
+                except Exception as _sum_xl_ex:
+                    st.warning(f"Excel export unavailable: {_sum_xl_ex}")
+
+        # ── Single-row inspector ───────────────────────────────────────
+        st.markdown("#### Inspect a Row")
+        _row_labels = [
+            f"Row {int(d['w'][1:])}  ·  {d['w']}  ·  "
+            f"Dir:{d.get('direction','U')}  ·  Present:{d['present_in']}  ·  "
+            f"S:{d['selected_n']}  ·  U:{d['unselected_n']}"
+            for d in dbg
+        ]
+        if _row_labels:
+            _sel_row_label = st.selectbox(
+                "Select row to inspect:",
+                _row_labels,
+                key=f"row_inspect_{db}"
+            )
+            _sel_i = _row_labels.index(_sel_row_label)
+            d = dbg[_sel_i]
+            i = _sel_i
+            w_lbl     = d["w"]
             cvi_set_d = d.get("cvi_set", set(d.get("cvi_numbers", [])))
             n_cols_d  = d.get("n_cols", [])
-            icon      = "✅" if d["selected_n"] > 0 else (
-                        "⚪" if d["present_in"] == 0 else "🔵")
-            carry_d   = d.get("direction","U")
-            note_d    = d.get("note","")
 
-            exp_header = (
-                f"{icon} Row {int(w_lbl[1:])}  ·  {w_lbl}  ·  "
-                f"Dir:{carry_d}  ·  Present:{d['present_in']}  ·  "
-                f"SC:{d['sc']}  ·  "
-                f"S:{d['selected_n']}  ·  U:{d['unselected_n']}"
-                + (f"  ·  ⚠️{note_d}" if note_d else "")
-            )
-
-            with st.expander(exp_header):
-                if not cvi_set_d:
-                    st.warning("No CVI numbers — column is empty. "
-                               "All present rows carry forward.")
-                    continue
-
-                # CVI numbers + distribution side by side
+            if not cvi_set_d:
+                st.warning(f"{w_lbl}: No CVI numbers — column is empty. "
+                           "All present rows carry forward.")
+            else:
+                # CVI numbers + distribution
                 cca, ccb = st.columns(2)
                 with cca:
                     st.markdown(f"**{w_lbl} numbers ({len(cvi_set_d)}):**")
                     st.write(sorted(cvi_set_d))
-
                 with ccb:
                     st.markdown("**Count distribution (present rows):**")
                     if d["count_dist"]:
@@ -4862,7 +6208,7 @@ elif page == "🖥️ Container Dashboards":
                              "Rows": v,
                              "": "✅ Sel" if int(k[1:]) in d["sc"]
                                  else "— Unsel"}
-                            for k,v in sorted(d["count_dist"].items())
+                            for k, v in sorted(d["count_dist"].items())
                         ])
                         st.dataframe(dist_df, hide_index=True,
                                      use_container_width=True, height=200)
@@ -4871,7 +6217,7 @@ elif page == "🖥️ Container Dashboards":
 
                 st.markdown("---")
 
-                # ── Main Data breakdown ────────────────────────────────
+                # Main Data breakdown (collapsible)
                 with st.expander(
                     f"📊 Main Data Breakdown  ·  M:{len(main_df)}"
                     f"  ·  {d.get('main_bd_str','—')}"
@@ -4879,43 +6225,34 @@ elif page == "🖥️ Container Dashboards":
                     md_wc = d.get("main_df_wc")
                     if md_wc is not None and not md_wc.empty:
                         show_filtered_highlighted(
-                            md_wc, cvi_set_d, n_cols_d,
-                            f"main_{i}")
-                        c1e,c2e = st.columns(2)
+                            md_wc, cvi_set_d, n_cols_d, f"main_{i}")
+                        c1e, c2e = st.columns(2)
                         with c1e:
                             st.download_button(
                                 "⬇ Main Breakdown CSV",
                                 to_csv_bytes(md_wc),
                                 f"{ind_prefix}_{w_lbl}_main.csv",
-                                "text/csv", key=f"dl_main_{db}_{i}"
-                            )
+                                "text/csv", key=f"dl_main_{db}_{i}")
                         with c2e:
                             st.download_button(
                                 "⬇ Main Breakdown Excel (highlighted)",
-                                to_styled_excel(
-                                    md_wc, cvi_set_d, n_cols_d,
-                                    f"{w_lbl}_Main"
-                                ),
+                                to_styled_excel(md_wc, cvi_set_d, n_cols_d,
+                                                f"{w_lbl}_Main"),
                                 f"{ind_prefix}_{w_lbl}_main.xlsx",
                                 "application/vnd.openxmlformats-officedocument"
                                 ".spreadsheetml.sheet",
-                                key=f"dl_main_xl_{db}_{i}"
-                            )
+                                key=f"dl_main_xl_{db}_{i}")
                     else:
                         st.info("Main data breakdown not available "
                                 f"(M>{DISPLAY_THRESHOLD:,} or no CVI).")
 
                 st.markdown("---")
 
-                # ── Selected + Unselected side by side ─────────────────
+                # Selected + Unselected side by side (collapsible)
                 ts, tu = st.columns(2)
-
                 with ts:
                     d_sel = d.get("sel_df")
                     with st.expander(
-                        f"✅ Selected  S:{d['selected_n']}  ·  "
-                        f"{d.get('count_dist',{}) and d.get('sel_bd_str', '') or '—'}"
-                        if False else
                         f"✅ Selected  S:{d['selected_n']}", expanded=True
                     ):
                         if d_sel is not None and not d_sel.empty:
@@ -4929,21 +6266,16 @@ elif page == "🖥️ Container Dashboards":
                                     f"⬇ {w_lbl} Selected CSV",
                                     to_csv_bytes(d_sel),
                                     f"{ind_prefix}_{w_lbl}_sel.csv",
-                                    "text/csv",
-                                    key=f"dl_sel_{db}_{i}"
-                                )
+                                    "text/csv", key=f"dl_sel_{db}_{i}")
                             with c2s:
                                 st.download_button(
                                     "⬇ Excel (highlighted)",
-                                    to_styled_excel(
-                                        d_sel, cvi_set_d, n_cols_d,
-                                        f"{w_lbl}_Sel"
-                                    ),
+                                    to_styled_excel(d_sel, cvi_set_d,
+                                                    n_cols_d, f"{w_lbl}_Sel"),
                                     f"{ind_prefix}_{w_lbl}_sel.xlsx",
                                     "application/vnd.openxmlformats-"
                                     "officedocument.spreadsheetml.sheet",
-                                    key=f"dl_sel_xl_{db}_{i}"
-                                )
+                                    key=f"dl_sel_xl_{db}_{i}")
                         elif d["selected_n"] == 0:
                             st.info("No rows selected at this stage.")
                         else:
@@ -4958,29 +6290,23 @@ elif page == "🖥️ Container Dashboards":
                     ):
                         if d_unsel is not None and not d_unsel.empty:
                             show_filtered_highlighted(
-                                d_unsel, cvi_set_d, n_cols_d,
-                                f"unsel_{i}")
+                                d_unsel, cvi_set_d, n_cols_d, f"unsel_{i}")
                             c1u, c2u = st.columns(2)
                             with c1u:
                                 st.download_button(
                                     f"⬇ {w_lbl} Unselected CSV",
                                     to_csv_bytes(d_unsel),
                                     f"{ind_prefix}_{w_lbl}_unsel.csv",
-                                    "text/csv",
-                                    key=f"dl_unsel_{db}_{i}"
-                                )
+                                    "text/csv", key=f"dl_unsel_{db}_{i}")
                             with c2u:
                                 st.download_button(
                                     "⬇ Excel (highlighted)",
-                                    to_styled_excel(
-                                        d_unsel, cvi_set_d, n_cols_d,
-                                        f"{w_lbl}_Unsel"
-                                    ),
+                                    to_styled_excel(d_unsel, cvi_set_d,
+                                                    n_cols_d, f"{w_lbl}_Unsel"),
                                     f"{ind_prefix}_{w_lbl}_unsel.xlsx",
                                     "application/vnd.openxmlformats-"
                                     "officedocument.spreadsheetml.sheet",
-                                    key=f"dl_unsel_xl_{db}_{i}"
-                                )
+                                    key=f"dl_unsel_xl_{db}_{i}")
                         elif d["unselected_n"] == 0:
                             st.info("No rows remaining.")
                         else:
@@ -5013,7 +6339,7 @@ elif page == "🖥️ Container Dashboards":
                 show_filtered_highlighted(
                     sel, final_cvi_set, n_f, "final_sel",
                     default_counts=None)
-                fpath = DIRS["Outputs"] / f"{ind_prefix}_selected.csv"
+                fpath = _gdirs["Outputs"] / f"{ind_prefix}_selected.csv"
                 sel.to_csv(fpath, index=False)
                 c1f, c2f = st.columns(2)
                 with c1f:
@@ -5154,7 +6480,7 @@ elif page == "📤 Master Outputs":
             return
         st.write(f"**{len(df):,} unique rows**")
         st.dataframe(df, use_container_width=True, height=380)
-        df.to_csv(DIRS["Outputs"]/fname, index=False)
+        df.to_csv(_gdirs["Outputs"]/fname, index=False)
         st.download_button(f"⬇ Export", to_csv_bytes(df), fname,"text/csv",
                            key=f"dl_out_{fname}")
 

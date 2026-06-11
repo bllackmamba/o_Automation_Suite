@@ -12,30 +12,23 @@ Requires: pip install streamlit pandas numpy openpyxl playwright requests beauti
 import streamlit as st
 import pandas as pd
 import numpy as np
-import re, json, time, random, asyncio, os, logging
+import re, json, time, random, asyncio, os
 from pathlib import Path
 from datetime import datetime
 from multiprocessing import Pool, cpu_count
 
 # ── 1-based row numbering for ALL tables ─────────────────────────────────────
-# Users count rows from 1, not 0.
-# Streamlit's st.dataframe does NOT reliably render a custom pandas .index —
-# it shows its own internal 1-to-N counter for the visible slice regardless of
-# what the pandas index is set to.  The portable fix is to insert an explicit
-# "#" column with the correct row numbers and hide the pandas index.
-# Fully guarded — never breaks rendering.
+# Users count rows from 1, not 0. Streamlit's default grey index starts at 0.
+# Wrap st.dataframe once so every preview shows a 1-based index (unless the call
+# explicitly hides the index). Fully guarded — never breaks rendering.
 _orig_st_dataframe = st.dataframe
 def _dataframe_1based(data=None, *args, **kwargs):
     try:
         if isinstance(data, pd.DataFrame) and not kwargs.get("hide_index", False):
             data = data.copy()
-            _col = "#"
-            if _col in data.columns:
-                _col = "_row_"
-            data.insert(0, _col, range(1, len(data) + 1))
-            kwargs["hide_index"] = True
-    except Exception as _e:
-        logging.warning("_dataframe_1based: failed to insert row-number column: %s", _e)
+            data.index = range(1, len(data) + 1)
+    except Exception:
+        pass
     return _orig_st_dataframe(data, *args, **kwargs)
 st.dataframe = _dataframe_1based
 
@@ -47,12 +40,6 @@ _PAGE_SIZE         = 50
 _PAGE_SIZE_OPTIONS = [25, 50, 100, 200]
 
 def show_paginated_df(df, key, use_container_width=True, height=None, hide_index=False, **kwargs):
-    # _next_page is set by button clicks and acted on OUTSIDE the try/except so
-    # that Streamlit's internal RerunException is never swallowed by a broad catch.
-    _next_page = None
-    _sk        = f"_pg_{key}"      # exposed outside try so rerun can use it
-    _n_pages   = 1                  # safe fallback
-
     try:
         if not isinstance(df, pd.DataFrame):
             return _orig_st_dataframe(df, use_container_width=use_container_width, **kwargs)
@@ -62,10 +49,8 @@ def show_paginated_df(df, key, use_container_width=True, height=None, hide_index
             return _orig_st_dataframe(df, use_container_width=use_container_width,
                                       hide_index=hide_index, **kwargs)
 
-        sk       = _sk
-        sk_ps    = f"_ps_{key}"
-        goto_key = f"_goto_{key}"
-        ps_key   = f"_pssel_{key}"
+        sk    = f"_pg_{key}"
+        sk_ps = f"_ps_{key}"
 
         # ── initialise session state ──────────────────────────────────────
         if sk    not in st.session_state: st.session_state[sk]    = 0
@@ -73,40 +58,21 @@ def show_paginated_df(df, key, use_container_width=True, height=None, hide_index
 
         page_size = int(st.session_state[sk_ps])
         n_pages   = max(1, (n_rows + page_size - 1) // page_size)
-        _n_pages  = n_pages   # expose to outer scope for rerun guard
         cur       = max(0, min(int(st.session_state[sk]), n_pages - 1))
 
         start_r = cur * page_size + 1
         end_r   = min((cur + 1) * page_size, n_rows)
-
-        # Sync goto widget to current page so it always reflects the live page.
-        st.session_state[goto_key] = cur + 1
-
-        # on_change callbacks — Streamlit calls these before the next rerun;
-        # they only update session state (no st.rerun() needed here).
-        def _on_goto():
-            val = st.session_state.get(goto_key, 1)
-            st.session_state[sk] = max(0, min(int(val) - 1, n_pages - 1))
-
-        def _on_ps():
-            new_ps = st.session_state.get(ps_key, _PAGE_SIZE)
-            st.session_state[sk_ps] = int(new_ps)
-            st.session_state[sk]    = 0
 
         # ── layout: table on the left, vertical nav panel on the right ───
         col_table, col_nav = st.columns([6, 1])
 
         with col_table:
             page_df = df.iloc[cur * page_size : (cur + 1) * page_size].copy()
-            page_df = page_df.reset_index(drop=True)
             if not hide_index:
-                _row_col = "#"
-                if _row_col in page_df.columns:
-                    _row_col = "_row_"
-                page_df.insert(0, _row_col,
-                               range(cur * page_size + 1,
-                                     cur * page_size + len(page_df) + 1))
-            disp_kwargs = dict(use_container_width=True, hide_index=True, **kwargs)
+                page_df.index = range(cur * page_size + 1,
+                                      cur * page_size + len(page_df) + 1)
+            disp_kwargs = dict(use_container_width=True,
+                               hide_index=hide_index, **kwargs)
             if height is not None:
                 disp_kwargs["height"] = height
             _orig_st_dataframe(page_df, **disp_kwargs)
@@ -122,37 +88,44 @@ def show_paginated_df(df, key, use_container_width=True, height=None, hide_index
                 f"</div>",
                 unsafe_allow_html=True)
 
-            # ── First ─────────────────────────────────────────────────
-            if st.button("« First", key=f"{sk}_first",
+            # ── First (top) ───────────────────────────────────────────
+            if st.button("⏫", key=f"{sk}_first",
                          use_container_width=True, disabled=(cur == 0),
-                         help="Jump to first page"):
-                _next_page = 0          # handled OUTSIDE try/except
+                         help="First page"):
+                st.session_state[sk] = 0
+                st.rerun()
 
-            # ── Back ──────────────────────────────────────────────────
-            if st.button("▲ Prev", key=f"{sk}_back",
+            # ── Back (up) ─────────────────────────────────────────────
+            if st.button("▲", key=f"{sk}_back",
                          use_container_width=True, disabled=(cur == 0),
                          help="Previous page"):
-                _next_page = cur - 1    # handled OUTSIDE try/except
+                st.session_state[sk] = cur - 1
+                st.rerun()
 
             # ── Go to page ────────────────────────────────────────────
-            st.number_input(
-                "pg", min_value=1, max_value=n_pages, step=1,
-                key=goto_key,
-                on_change=_on_goto,
+            goto = st.number_input(
+                "pg", min_value=1, max_value=n_pages,
+                value=cur + 1, step=1,
+                key=f"{sk}_goto",
                 label_visibility="collapsed",
                 help=f"Go to page (1–{n_pages})")
+            if int(goto) - 1 != cur:
+                st.session_state[sk] = int(goto) - 1
+                st.rerun()
 
-            # ── Next ──────────────────────────────────────────────────
-            if st.button("Next ▼", key=f"{sk}_next",
+            # ── Next (down) ───────────────────────────────────────────
+            if st.button("▼", key=f"{sk}_next",
                          use_container_width=True, disabled=(cur >= n_pages - 1),
                          help="Next page"):
-                _next_page = cur + 1    # handled OUTSIDE try/except
+                st.session_state[sk] = cur + 1
+                st.rerun()
 
-            # ── Last ──────────────────────────────────────────────────
-            if st.button("Last »", key=f"{sk}_last",
+            # ── Last (bottom) ─────────────────────────────────────────
+            if st.button("⏬", key=f"{sk}_last",
                          use_container_width=True, disabled=(cur >= n_pages - 1),
-                         help="Jump to last page"):
-                _next_page = n_pages - 1  # handled OUTSIDE try/except
+                         help="Last page"):
+                st.session_state[sk] = n_pages - 1
+                st.rerun()
 
             # ── Rows per page ─────────────────────────────────────────
             st.markdown(
@@ -161,36 +134,19 @@ def show_paginated_df(df, key, use_container_width=True, height=None, hide_index
                 unsafe_allow_html=True)
             ps_idx = _PAGE_SIZE_OPTIONS.index(page_size) \
                      if page_size in _PAGE_SIZE_OPTIONS else 1
-            st.selectbox(
+            new_ps = st.selectbox(
                 "rows", _PAGE_SIZE_OPTIONS,
                 index=ps_idx,
-                key=ps_key,
-                on_change=_on_ps,
+                key=f"{sk}_ps",
                 label_visibility="collapsed",
                 help="Rows per page")
+            if int(new_ps) != page_size:
+                st.session_state[sk_ps] = int(new_ps)
+                st.session_state[sk]    = 0
+                st.rerun()
 
     except Exception:
-        # Fallback: render plain table if anything in the pagination UI fails.
-        # _next_page is checked AFTER this block so a pending rerun is never lost.
-        try:
-            _fb = df.copy() if isinstance(df, pd.DataFrame) else df
-            if isinstance(_fb, pd.DataFrame) and not kwargs.get("hide_index", False):
-                _fc = "#"
-                if _fc in _fb.columns:
-                    _fc = "_row_"
-                _fb.insert(0, _fc, range(1, len(_fb) + 1))
-                _orig_st_dataframe(_fb, use_container_width=use_container_width,
-                                   hide_index=True, **kwargs)
-            else:
-                _orig_st_dataframe(df, use_container_width=use_container_width, **kwargs)
-        except Exception:
-            _orig_st_dataframe(df, use_container_width=use_container_width, **kwargs)
-
-    # ── SAFE rerun: executed outside try/except so RerunException is never
-    # swallowed.  This is the fix for buttons that appeared to do nothing.
-    if _next_page is not None:
-        st.session_state[_sk] = max(0, min(int(_next_page), _n_pages - 1))
-        st.rerun()
+        _orig_st_dataframe(df, use_container_width=use_container_width, **kwargs)
 
 try:
     from playwright.async_api import async_playwright
@@ -565,10 +521,10 @@ GAMES_CFG = {
     "sat": {
         "label": "Saturday Lotto", "emoji": "🟡", "pool": 45, "pick": 6,
         "draw_day": "Saturday",
-        # "tattslotto" is the correct slug for TattsLotto / Saturday Lotto (draws ~4683+).
-        # "weekday-windfall" is Mon/Wed/Fri; "tatts-lotto" (hyphenated) served Set for Life data.
-        # History URL is derived by replace() which gives /history/australia/tattslotto.
-        "lottolyzer": "https://en.lottolyzer.com/number-frequencies/australia/tattslotto",
+        # NOTE: If this URL opens Set for Life instead of Saturday Lotto, override
+        # it in the Since Last tab (Variable Inputs → Since Last → URL field).
+        # Known alternative: https://en.lottolyzer.com/number-frequencies/australia/tatts-lotto
+        "lottolyzer": "https://en.lottolyzer.com/number-frequencies/australia/saturday-lotto",
         "b_file": "Base_sat.xlsx", "b_sheet": "B_sat",
         "b_sheet_legacy": "Ta (2)", "thelott_key": "sat",
     },
@@ -582,10 +538,7 @@ GAMES_CFG = {
     "mwf": {
         "label": "Mon/Wed/Fri", "emoji": "🟣", "pool": 45, "pick": 6,
         "draw_day": "Mon, Wed, Fri",
-        # Lottolyzer uses "weekday-windfall" for Mon/Wed/Fri Lotto (draws ~4692+, 6 picks, pool 1-45).
-        # "tatts-lotto" was previously used here but it serves Set for Life data — do NOT use it.
-        # "tattslotto" (no hyphen) is Saturday Lotto — also distinct.
-        "lottolyzer": "https://en.lottolyzer.com/number-frequencies/australia/weekday-windfall",
+        "lottolyzer": "https://en.lottolyzer.com/number-frequencies/australia/monday-lotto",
         "b_file": "Base_mwf.xlsx", "b_sheet": "B_mwf",      # own file+sheet; was colliding via "Ta (2)"
         "b_sheet_legacy": "Ta (2)", "thelott_key": "mwf",
     },
@@ -660,8 +613,7 @@ def split_d_by_game(src_csv: Path, root: Path) -> dict:
         # Split pipe-separated multi-game entries
         parts = [g.strip() for g in raw_games.split("|")]
 
-        # Build a mapping from destination game key → canonical game name for that key
-        matched: dict[str, str] = {}
+        matched_keys = set()
         for part in parts:
             if part not in GAME_NAME_MAP:
                 unknown_games.add(part)
@@ -670,14 +622,10 @@ def split_d_by_game(src_csv: Path, root: Path) -> dict:
                 if gkey is None:
                     skipped_games.add(part)  # intentionally skipped
                 else:
-                    matched[gkey] = part  # keep last canonical name per key
+                    matched_keys.add(gkey)
 
-        for gkey, canonical_name in matched.items():
-            # Overwrite Games to the single target game so re-running split never
-            # re-routes this row to other game folders (pipe value would cause that).
-            out_row = row.copy()
-            out_row["Games"] = canonical_name
-            game_rows[gkey].append(out_row)
+        for gkey in matched_keys:
+            game_rows[gkey].append(row)
 
     # Save each game's rows to its Direct/ folder
     state_tag = src_csv.stem   # e.g. "D_NSW_NSW"
@@ -687,13 +635,11 @@ def split_d_by_game(src_csv: Path, root: Path) -> dict:
     # w-columns for D (via _to_w_rows), so identity/label columns can no longer leak
     # into numeric output — which means we can safely retain Draw_Number (+ Draw_Date)
     # here. The draw number is essential for per-draw coverage analysis.
-    # Postcode and State are required: _picks_columns() lists them as preferred and
-    # _picks_dedup() uses them as part of the row identity key.
     def _clean_for_pipeline(gdf: pd.DataFrame) -> pd.DataFrame:
         w_cols = sorted([c for c in gdf.columns if re.match(r'^w\d+$', str(c), re.I)],
                         key=lambda x: int(str(x)[1:]))
         keep = [c for c in ("Syndicate_ID", "Syndicate_Name", "Game", "Games",
-                            "Draw_Number", "Draw_Date", "Postcode", "State")
+                            "Draw_Number", "Draw_Date")
                 if c in gdf.columns]
         if "PB" in gdf.columns:
             keep.append("PB")
@@ -704,10 +650,8 @@ def split_d_by_game(src_csv: Path, root: Path) -> dict:
         if not rows:
             results[gkey] = 0
             continue
-        raw_count = len(rows)
         gdf = pd.DataFrame(rows).reset_index(drop=True)
         gdf = _clean_for_pipeline(gdf)
-        _warn_row_shrink(f"split_d_by_game/{state_tag}/{gkey}", raw_count, len(gdf))
         dest_dir = game_dirs(gkey)["Direct"]
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest_file = dest_dir / f"{state_tag}_{gkey}.csv"
@@ -722,25 +666,14 @@ def split_d_by_game(src_csv: Path, root: Path) -> dict:
     return results
 
 
-def _warn_row_shrink(label: str, before: int, after: int, threshold: float = 0.05) -> None:
-    """Log a warning when a pipeline step drops more than `threshold` of rows."""
-    import logging as _log
-    if before > 0 and (before - after) / before > threshold:
-        pct = (before - after) / before * 100
-        _log.warning(
-            "[row-count] %s: %d → %d rows (%.1f%% dropped — exceeds %.0f%% threshold)",
-            label, before, after, pct, threshold * 100,
-        )
-
-
 def combine_states_for_game(game_key: str) -> dict:
     """Merge every per-state split file for a game into ONE national file.
 
     Reads all D_<STATE>_<game>.csv in the game's Games_Breakdown folder (e.g.
     D_NSW_pb.csv, D_VIC_pb.csv, …), concatenates them — each state's syndicates
-    are distinct, so we keep them all (a "national view") — drops only rows with
-    duplicate Syndicate_IDs (guards against an accidental re-run without losing
-    valid unique rows from different states), and writes D_ALL_<game>.csv.
+    are distinct, so we keep them all (a "national view") — drops only exact
+    duplicate rows (guards against an accidental re-run), and writes
+    D_ALL_<game>.csv. That combined file becomes the default CVI source.
     Returns {"states": [...], "files": n, "rows": total}.
     """
     gb = game_dirs(game_key)["Games_Breakdown"]
@@ -750,10 +683,7 @@ def combine_states_for_game(game_key: str) -> dict:
             continue
         try:
             df = pd.read_csv(fp)
-        except Exception as _read_err:
-            import logging as _lg
-            _lg.warning("combine_states_for_game: skipping unreadable file %s — %s",
-                        fp.name, _read_err)
+        except Exception:
             continue
         if df.empty:
             continue
@@ -767,15 +697,9 @@ def combine_states_for_game(game_key: str) -> dict:
         return {"states": [], "files": 0, "rows": 0}
     combined = pd.concat(parts, ignore_index=True)
     before = len(combined)
-    # Dedup on Syndicate_ID only — guards against re-running the same state file
-    # without collapsing valid cross-state rows that happen to share all field values.
-    dedup_cols = [c for c in ["Syndicate_ID"] if c in combined.columns]
-    combined = (combined.drop_duplicates(subset=dedup_cols, keep="first")
-                if dedup_cols else combined.drop_duplicates())
-    combined = combined.reset_index(drop=True)
-    _warn_row_shrink(f"combine_states_for_game({game_key})", before, len(combined))
+    combined = combined.drop_duplicates().reset_index(drop=True)
     out = gb / f"D_ALL_{game_key}.csv"
-    _write_csv_atomic(out, combined, index=False)
+    combined.to_csv(out, index=False)
     return {"states": states, "files": len(parts),
             "rows": len(combined), "dropped_dups": before - len(combined),
             "path": str(out)}
@@ -935,24 +859,12 @@ def load_clusters() -> list[dict]:
     if CLUSTER_REGISTRY.exists():
         try:
             return json.loads(CLUSTER_REGISTRY.read_text())
-        except Exception as _e:
-            import logging as _lg
-            _lg.warning("load_clusters: failed to parse %s — cluster history unavailable (%s)",
-                        CLUSTER_REGISTRY, _e)
+        except Exception:
+            pass
     return []
 
 def save_clusters(clusters: list[dict]):
-    import os as _os
-    tmp = CLUSTER_REGISTRY.with_suffix(".tmp")
-    try:
-        tmp.write_text(json.dumps(clusters, indent=2))
-        _os.replace(tmp, CLUSTER_REGISTRY)
-    except Exception:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
-        raise
+    CLUSTER_REGISTRY.write_text(json.dumps(clusters, indent=2))
 
 def next_cluster_id(clusters: list[dict]) -> str:
     if not clusters:
@@ -1027,20 +939,9 @@ def _parallel_worker(args: tuple) -> dict:
                 key=lambda x: int(re.sub(r'\D', '', x) or 0)
             )[:20]
         else:
-            _META_BLOCKED = frozenset({
-                "postcode", "draw_number", "draw_no", "draw", "length",
-                "share_cost", "available_shares", "total_shares", "outlet_id",
-                "syndicate_id", "row_number", "rownum",
-            })
-            _ncands = []
-            for _c in main_df.columns:
-                if _c.lower() in _META_BLOCKED:
-                    continue
-                _s = pd.to_numeric(main_df[_c], errors="coerce")
-                if _s.notna().mean() > 0.9 and _s.max() <= 99:
-                    _ncands.append(_c)
             n_cols = sorted(
-                _ncands,
+                [c for c in main_df.columns
+                 if pd.to_numeric(main_df[c], errors="coerce").notna().mean() > 0.9],
                 key=lambda x: int(re.sub(r'\D', '', x) or 0)
             )[:20]
 
@@ -1059,8 +960,7 @@ def _parallel_worker(args: tuple) -> dict:
                     n = float(str(v).strip())
                     if not pd.isna(n) and n >= 1:
                         r.append(int(round(n)))
-                except Exception as _e:
-                    logging.warning("parse_series: could not convert value %r to float: %s", v, _e)
+                except Exception: pass
             return r
 
         def match_chunk(arr, cvi_arr):
@@ -1069,9 +969,14 @@ def _parallel_worker(args: tuple) -> dict:
                 counts += np.isin(arr[:,j], cvi_arr).astype(np.int32)
             return counts
 
-        import logging as _wlog
         for idx, w in enumerate(w_cols):
-            # Determine present pool FIRST (mirrors run_matching carry-forward order)
+            raw_cvi = parse_col(cvi_df[w])
+            if not raw_cvi:
+                continue
+            cvi_arr = np.array(raw_cvi, dtype=np.float32)
+            sc_this = sc_dict.get(w, [])
+            sc_set  = set(sc_this)
+
             direction = carry_fwd.get(w, "U").upper()
             if idx == 0:
                 present = main_df.copy().reset_index(drop=True)
@@ -1079,21 +984,6 @@ def _parallel_worker(args: tuple) -> dict:
                 present = prev_sel.reset_index(drop=True)
             else:
                 present = prev_unsel.reset_index(drop=True)
-
-            raw_cvi = parse_col(cvi_df[w])
-            if not raw_cvi:
-                # Mirror run_matching: all rows carry forward, selected pool resets.
-                # Stale prev_sel/prev_unsel must NOT persist — a later "S" stage
-                # would incorrectly receive the pool from before the empty column.
-                prev_sel    = pd.DataFrame()
-                prev_unsel  = present.copy()
-                final_sel   = pd.DataFrame()
-                final_unsel = present.copy()
-                continue
-
-            cvi_arr = np.array(raw_cvi, dtype=np.float32)
-            sc_this = sc_dict.get(w, [])
-            sc_set  = set(sc_this)
 
             if present.empty:
                 break
@@ -1109,12 +999,6 @@ def _parallel_worker(args: tuple) -> dict:
             sel_mask = np.isin(all_counts, list(sc_set))
             sel_df   = present[sel_mask].reset_index(drop=True)
             unsel_df = present[~sel_mask].reset_index(drop=True)
-
-            if len(sel_df) + len(unsel_df) != len(present):
-                _wlog.warning(
-                    "[parallel_worker] %s: sel(%d) + unsel(%d) != present(%d)",
-                    w, len(sel_df), len(unsel_df), len(present),
-                )
 
             prev_sel   = sel_df
             prev_unsel = unsel_df
@@ -1143,22 +1027,8 @@ def _parallel_worker(args: tuple) -> dict:
     return result
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 3. SESSION STATE — single shared dict S (unscoped) + game-scoped helpers
+# 3. SESSION STATE — single shared dict S
 # ═══════════════════════════════════════════════════════════════════════════════
-
-def gkey(name: str) -> str:
-    """Return a session_state key scoped to the active game."""
-    return f"{name}__{active_game()}"
-
-def gs(name: str, default=None):
-    """Get a game-scoped session_state value, with default."""
-    return st.session_state.get(gkey(name), default)
-
-def gs_set(name: str, value):
-    """Set a game-scoped session_state value."""
-    st.session_state[gkey(name)] = value
-    return value
-
 def _auto_load_b(game_key: str = "sat") -> pd.DataFrame:
     """Try to auto-load the Base file for game_key from the project folder tree.
 
@@ -1168,7 +1038,6 @@ def _auto_load_b(game_key: str = "sat") -> pd.DataFrame:
       3. Shared Base.xlsx anywhere under ROOT
       4. Legacy f_rules_Gclaude.xlsx anywhere under ROOT
     Returns a DataFrame of w-columns (column-oriented), or empty DataFrame.
-    Data is NEVER reordered or altered — values are read exactly as stored.
     """
     gcfg = GAMES_CFG.get(game_key, {})
     b_file = gcfg.get("b_file", f"Base_{game_key}.xlsx")
@@ -1194,44 +1063,11 @@ def _auto_load_b(game_key: str = "sat") -> pd.DataFrame:
             if sheet is None:
                 continue
             raw = xl.parse(sheet, header=None)
-
-            def _safe_nums_from_row(series):
-                out = []
-                for v in series.dropna():
-                    try:
-                        fv = float(v)
-                        if fv >= 1:
-                            out.append(int(fv))
-                    except (ValueError, TypeError):
-                        pass
-                return out
-
-            # ── Strategy 0: col 0 has w-prefixed row labels (row-oriented) ────
-            # B_sat layout: col A = "w1"/"w701"…; numbers run across each row.
-            # Returns a row-oriented DataFrame — each row is one w-set.
-            _col0 = [str(raw.iloc[r, 0]).strip() for r in range(raw.shape[0])]
-            _w_row_pairs = [(r, _col0[r]) for r in range(len(_col0))
-                            if _col0[r].lower().startswith("w")]
-            if _w_row_pairs:
-                _rows = []
-                for _rr, _wlabel in _w_row_pairs:
-                    _nums = _safe_nums_from_row(raw.iloc[_rr, 1:])
-                    if _nums:
-                        _row = {"w": _wlabel}
-                        _row.update({f"pos_{i+1}": n for i, n in enumerate(_nums)})
-                        _rows.append(_row)
-                if _rows:
-                    return pd.DataFrame(_rows)
-
-            # ── Strategy 1: row 0 has w-prefixed column headers ───────────────
-            w_col_pairs = [
-                (c, str(raw.iloc[0, c]).strip())
-                for c in range(raw.shape[1])
-                if str(raw.iloc[0, c]).strip().lower().startswith("w")
-            ]
+            w_cols = [str(raw.iloc[0, c]) for c in range(raw.shape[1])
+                      if str(raw.iloc[0, c]).startswith("w")]
             b_data = {}
-            for actual_col, wc in w_col_pairs:
-                col_vals = raw.iloc[1:, actual_col].dropna()
+            for i, wc in enumerate(w_cols):
+                col_vals = raw.iloc[1:, i].dropna()
                 nums = [int(float(v)) for v in col_vals
                         if str(v).replace(".", "").replace("-", "").isdigit()
                         and float(v) >= 1]
@@ -1245,10 +1081,7 @@ def _auto_load_b(game_key: str = "sat") -> pd.DataFrame:
 
 
 def _init_state():
-    # Re-init if S exists but uses the old unscoped key format (pre-game-isolation refactor).
-    # Guard: skip if S (unscoped) already initialised AND game-scoped keys exist.
-    # gkey("B") == "B__sat" at startup (active_game() defaults to "sat").
-    if "S" in st.session_state and gkey("B") in st.session_state:
+    if "S" in st.session_state:
         return
     # Auto-load B for the default game (sat) at startup.
     # The active game can change via the game selector; B will reload in the B tab.
@@ -1257,26 +1090,30 @@ def _init_state():
     if _b_init.empty:
         _b_init = _load_file(_sat_dirs["Base"] / "B.xlsx")   # legacy fallback
 
-    # Unscoped infrastructure — lives in the S dict as before.
     st.session_state.S = {
-        "cf_active":         {r[1]: True for r in CF_ROWS},
-        "auto":              {},
+        # Variable DataFrames
+        "B":   _b_init,
+        "R":   pd.DataFrame(),
+        "D":   _load_file(_sat_dirs["Direct"]       / "D.xlsx"),
+        "Sp":  _load_file(_sat_dirs["Splits"]       / "data_1b.xlsx"),
+        "So":  _load_file(_sat_dirs["Splits_Combi"] / "data.xlsx"),
+        # Main Data (user uploads manually each run)
+        "main_data": pd.DataFrame(),
+        # Collated CVI results per formula
+        "cvi": {},
+        # Matching results per dashboard
+        "results": {},
+        # Container formula active flags
+        "cf_active": {r[1]: True for r in CF_ROWS},
+        # Auto mode per section
+        "auto": {},
+        # Scraper state
         "confirmed_api_url": "",
-        "cookie_str":        "",
-        "scrape_log":        [],
-        "container_status":  {},
+        "cookie_str": "",
+        "scrape_log": [],
+        # Container status per dashboard
+        "container_status": {},
     }
-    # Game-scoped DataFrames — stored directly in st.session_state via gs_set().
-    # Only the default game (sat) is pre-loaded; other games populate on demand.
-    gs_set("B",              _b_init)
-    gs_set("R",              pd.DataFrame())
-    gs_set("D",              _load_file(_sat_dirs["Direct"]       / "D.xlsx"))
-    gs_set("Sp",             _load_sets_file(_sat_dirs["Splits"]       / "data_1b.xlsx"))
-    gs_set("So",             _load_sets_file(_sat_dirs["Splits_Combi"] / "data.xlsx"))
-    gs_set("main_data",      pd.DataFrame())
-    gs_set("main_data_path", "")
-    gs_set("cvi",            {})
-    gs_set("results",        {})
     # Init container status
     for db in DASHBOARDS:
         st.session_state.S["container_status"][db] = pd.DataFrame({
@@ -1382,43 +1219,6 @@ def _load_file_preview(path: Path, n: int = 20) -> pd.DataFrame:
     """Load first N rows only — never freezes."""
     return _load_file(path, max_rows=n, numeric=False)
 
-def _load_sets_file(path: Path) -> pd.DataFrame:
-    """Load a Sp / So / Ep CSV saved row-oriented (via _sets_df_to_rows) and
-    restore it to column-oriented format expected by S['Sp'] / S['So'] / S['Ep'].
-
-    If the file has a 'set' column (row-oriented), applies _rows_to_sets_df to
-    transpose back to column-oriented.  Falls back to plain _load_file for legacy
-    column-oriented files.  R files are never passed here — they stay column-oriented.
-    """
-    df = _load_file(path, numeric=False)
-    if df.empty:
-        return df
-    if "set" in df.columns:
-        # Row-oriented on disk — transpose back to column-oriented for in-memory use
-        return _rows_to_sets_df(df, set_col="set")
-    return df
-
-
-def _write_csv_atomic(path: Path, df: pd.DataFrame, **kwargs) -> None:
-    """Write df to path atomically: write to .tmp then os.replace().
-
-    Prevents half-written files on crash. pandas to_csv() opens in 'w' mode
-    which immediately truncates the destination; a crash mid-write leaves an
-    empty or partial file that pandas then silently reads back as fewer rows.
-    """
-    import os as _os
-    tmp = path.with_suffix(".tmp")
-    try:
-        df.to_csv(tmp, **kwargs)
-        _os.replace(tmp, path)
-    except Exception:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
-        raise
-
-
 def _save_df(df: pd.DataFrame, path: Path):
     """Save DataFrame to CSV, padding n-columns to consistent width.
 
@@ -1436,7 +1236,7 @@ def _save_df(df: pd.DataFrame, path: Path):
         for i in range(1, max_n+1):
             if f"n{i}" not in out.columns:
                 out[f"n{i}"] = None
-    _write_csv_atomic(path, out, index=False)
+    out.to_csv(path, index=False)
 
 
 def to_csv_bytes(df: pd.DataFrame) -> bytes:
@@ -1724,24 +1524,9 @@ def run_matching(main_df: pd.DataFrame,
             key=lambda x: int(re.sub(r'\D', '', x) or 0)
         )[:20]
     else:
-        # Name-blocklist guards against known metadata columns whose values happen
-        # to be all-numeric (Postcode, Draw_Number, etc.).  Max-value cap of 99
-        # guards against any unlisted numeric metadata column (postcodes ≥ 800,
-        # draw numbers ≥ 1000) since no Australian lottery pool exceeds 47.
-        _META_BLOCKED = frozenset({
-            "postcode", "draw_number", "draw_no", "draw", "length",
-            "share_cost", "available_shares", "total_shares", "outlet_id",
-            "syndicate_id", "row_number", "rownum",
-        })
-        _ncands = []
-        for _c in main_df.columns:
-            if _c.lower() in _META_BLOCKED:
-                continue
-            _s = pd.to_numeric(main_df[_c], errors="coerce")
-            if _s.notna().mean() > 0.9 and _s.max() <= 99:
-                _ncands.append(_c)
         n_cols = sorted(
-            _ncands,
+            [c for c in main_df.columns
+             if pd.to_numeric(main_df[c], errors="coerce").notna().mean() > 0.9],
             key=lambda x: int(re.sub(r'\D', '', x) or 0)
         )[:20]
 
@@ -1905,13 +1690,6 @@ def run_matching(main_df: pd.DataFrame,
         sel_df     = present_df[sel_mask].reset_index(drop=True)
         unsel_df   = present_df[~sel_mask].reset_index(drop=True)
 
-        if len(sel_df) + len(unsel_df) != present_count:
-            import logging as _rlog
-            _rlog.warning(
-                "[run_matching] %s: sel(%d) + unsel(%d) != present(%d) — row loss in mask",
-                w, len(sel_df), len(unsel_df), present_count,
-            )
-
         # Add count column to sel/unsel for display
         if small_enough and not sel_df.empty:
             sel_counts_arr = pres_counts[sel_mask]
@@ -2006,15 +1784,6 @@ def run_matching(main_df: pd.DataFrame,
                 })
             break
 
-    _final_total = len(final_sel) + len(final_unsel)
-    if _final_total != M:
-        import logging as _rlog
-        _rlog.warning(
-            "[run_matching] final: selected(%d) + unselected(%d) = %d, original M=%d%s",
-            len(final_sel), len(final_unsel), _final_total, M,
-            " (expected for multi-stage carry-forward)" if len(w_cols) > 1 else "",
-        )
-
     return {
         "selected":    final_sel,
         "unselected":  final_unsel,
@@ -2053,39 +1822,14 @@ def prepare_d_input_sets(D: pd.DataFrame, n: int) -> pd.DataFrame:
     is a DataFrame whose columns are w1, w2, w3, w4, … each holding one long entry's
     numbers.
 
-    Handles two input orientations automatically:
-      • Column-oriented D (legacy): columns are positional w1,w2,w3… (number slots),
-        each ROW is one syndicate — peels n longest rows into output columns.
-      • Row-oriented D (new):  each ROW is already a complete number set stored as
-        pos_1, pos_2, … columns (or a leading 'set'/'label' column).  The function
-        transposes these rows into columns before sorting by length and taking the top n.
-        This matches the new convention where Sp/So/Ep input files are stored as rows.
+    Example: D's three System-20 rows + one System-19 row (3+1=4) → columns w1,w2,w3,w4.
+    Note: In ALL D, each syndicate IS a row labeled w1,w2… (number positions across).
+    Here we peel those rows into COLUMNS w1,w2,w3,w4 (one syndicate per column) so the
+    generators can work with them as independent sets.
     """
     if D is None or D.empty or n < 1:
         return pd.DataFrame()
-
-    # ── Detect orientation ────────────────────────────────────────────────
-    wcols   = [c for c in D.columns if re.match(r'^w\d+$',   str(c), re.I)]
-    pos_cols = [c for c in D.columns if re.match(r'^pos_\d+$', str(c), re.I)]
-    set_col  = next((c for c in D.columns
-                     if str(c).strip().lower() in ("set", "label", "name")), None)
-
-    if pos_cols or (set_col and not wcols):
-        # ── Row-oriented input: transpose rows → columns first ────────────
-        col_df = _rows_to_sets_df(D, set_col=set_col) if set_col else \
-                 _rows_to_sets_df(D.rename(columns={D.columns[0]: "set"}), set_col="set")
-        # Sort columns by their length (longest set first)
-        lengths = {c: col_df[c].notna().sum() for c in col_df.columns}
-        sorted_cols = sorted(lengths, key=lambda x: lengths[x], reverse=True)
-        top_cols = sorted_cols[:n]
-        labels = [f"w{i+1}" for i in range(len(top_cols))]
-        result = {}
-        for label, col in zip(labels, top_cols):
-            nums = [int(x) for x in col_df[col].dropna()]
-            result[label] = pd.Series(nums, dtype="Int64")
-        return pd.DataFrame(result)
-
-    # ── Column-oriented D: original behaviour (wN positional columns) ─────
+    wcols = [c for c in D.columns if re.match(r'^w\d+$', str(c), re.I)]
     if not wcols:
         return pd.DataFrame()
     ordered = sort_d_longest_first(D)
@@ -2307,10 +2051,6 @@ def prepare_ep_objects(D: pd.DataFrame, mode: str = "pairs") -> dict:
 
     mode='halves': the 4 LONGEST D rows, each split in half (arrayOne=first half,
       arrayTwo=second half) — kept as an alternative.
-
-    Accepts both column-oriented D (w1,w2,… positional columns) and
-    row-oriented D (pos_1,pos_2,… columns — new convention).  Row-oriented input
-    is transposed automatically via prepare_d_input_sets before pairing.
     """
     if mode == "pairs":
         inp = prepare_d_input_sets(D, 8)   # columns: w1, w2, … w8 (8 longest rows)
@@ -2420,32 +2160,6 @@ def _sets_df_to_rows(df: pd.DataFrame, set_col: str = "set") -> pd.DataFrame:
     non_empty_val = [c for c in val_cols if t[c].notna().any()]
     t = t[[set_col] + non_empty_val].reset_index(drop=True)
     return t
-
-
-def _rows_to_sets_df(df: pd.DataFrame, set_col: str = "set") -> pd.DataFrame:
-    """Inverse of _sets_df_to_rows: transpose row-oriented sets → column-oriented.
-
-    Input:  one row per set; first column = set name (set_col);
-            remaining columns = pos_1, pos_2, … (the actual numbers).
-    Output: columns = set names; rows = values padded with NaN.
-    Used to read row-oriented input files back into the column-oriented format
-    that Ep / Sp / So generators expect.
-    If set_col is absent, row indices are used as column names.
-    """
-    if df is None or df.empty:
-        return pd.DataFrame()
-    val_cols = [c for c in df.columns if c != set_col]
-    if set_col in df.columns:
-        labels = df[set_col].astype(str).tolist()
-        data   = df[val_cols].values
-    else:
-        labels = [f"s{i}" for i in range(len(df))]
-        data   = df.values
-    result = {}
-    for label, row in zip(labels, data):
-        nums = [x for x in row if pd.notna(x)]
-        result[label] = pd.Series(nums, dtype="Int64")
-    return pd.DataFrame(result)
 
 
 # ── Universal file reader ──────────────────────────────────────────────────
@@ -2699,8 +2413,7 @@ async def _pw_scrape_state(state: str, postcodes: list,
                         body = (await resp.body()).decode("utf-8","ignore")
                         if body.strip()[:1] in ["{","["]:
                             captured.append({"url":resp.url,"body":body})
-                    except Exception as _e:
-                        logging.warning("scraper: could not read response body from %s: %s", resp.url, _e)
+                    except Exception: pass
 
             page.on("response", on_resp)
             try:
@@ -2717,8 +2430,7 @@ async def _pw_scrape_state(state: str, postcodes: list,
                             await el.press("Enter")
                             await asyncio.sleep(2)
                             break
-                    except Exception as _e:
-                        logging.warning("scraper: locator %r interaction failed: %s", sel, _e)
+                    except Exception: pass
                 await asyncio.sleep(2)
 
                 recs = []
@@ -2757,20 +2469,11 @@ import urllib.request as _urlreq
 _STATE_COMPANY = {"NSW": 3, "ACT": 3, "VIC": 1, "TAS": 1, "QLD": 2, "SA": 6}
 
 _TLOTT_HEADERS = {
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-AU,en-GB;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept": "application/json",
     "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
     "Origin":  "https://www.thelott.com",
-    "Referer": "https://www.thelott.com/",
-    "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"macOS"',
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-site",
-    "Connection": "keep-alive",
+    "Referer": "https://www.thelott.com/play/syndicates/syndicate-shares",
 }
 
 def _ssl_ctx():
@@ -2779,25 +2482,14 @@ def _ssl_ctx():
     ctx.verify_mode = _ssl.CERT_NONE
     return ctx
 
-def _api_get(url: str, _retries: int = 4):
-    """Raw GET with SSL bypass and exponential backoff. Returns parsed JSON or None."""
-    import gzip as _gz
-    for attempt in range(_retries):
-        try:
-            req = _urlreq.Request(url, headers=_TLOTT_HEADERS)
-            with _urlreq.urlopen(req, timeout=15, context=_ssl_ctx()) as r:
-                body = r.read()
-                try:
-                    body = _gz.decompress(body)
-                except Exception:
-                    pass
-                return json.loads(body.decode("utf-8"))
-        except Exception as exc:
-            if attempt == _retries - 1:
-                return None
-            wait = (2 ** attempt) + random.uniform(0.1, 0.5)
-            time.sleep(wait)
-    return None
+def _api_get(url: str):
+    """Raw GET with SSL bypass (required on Mac). Returns parsed JSON or None."""
+    req = _urlreq.Request(url, headers=_TLOTT_HEADERS)
+    try:
+        with _urlreq.urlopen(req, timeout=15, context=_ssl_ctx()) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
 
 def _is_online() -> bool:
     """Quick connectivity check to thelott API."""
@@ -2817,18 +2509,10 @@ def _fetch_outlets(state: str, postcode: int) -> list:
     data = _api_get(url)
     if not data:
         return []
-    # API returns {"locality_outlets": [{"locality": "...", "outlets": [...]}]}
-    # Fall back to flat list or top-level "outlets" for forward-compat
-    if isinstance(data, list):
-        flat = data
-    elif "locality_outlets" in data:
-        flat = [o for loc in data["locality_outlets"]
-                for o in loc.get("outlets", [])]
-    else:
-        flat = data.get("outlets", [])
+    outlets = data if isinstance(data, list) else data.get("outlets", [])
     ids = []
-    for o in flat:
-        oid = str(o.get("outlet_id") or o.get("id") or o.get("outletId") or "").strip()
+    for o in (outlets if isinstance(outlets, list) else []):
+        oid = str(o.get("id") or o.get("outletId") or "").strip()
         if oid:
             ids.append(oid)
     return ids
@@ -2876,7 +2560,7 @@ def _parse_syndicate_row(syn: dict, postcode: int, state: str) -> dict:
         "State":            state,
         "Syndicate_ID":     g("syndicateId", "id", "syndicateNumber"),
         "Syndicate_Name":   g("syndicateName", "title", "name", "description"),
-        "Draw_Date":        g("syndicateDate", "drawDate", "draw_date", "scheduledDate", "closeDate"),
+        "Draw_Date":        g("drawDate", "draw_date", "scheduledDate", "closeDate"),
         "Share_Cost":       g("sharePrice", "price", "costPerShare", "shareCost"),
         "Available_Shares": g("availableShares", "sharesAvailable", "sharesRemaining"),
         "Total_Shares":     g("totalShares", "shareCount", "shares"),
@@ -3132,7 +2816,7 @@ def _picks_fetch_details(syndicate_id: int, company: int) -> list:
                 "Available_Shares": avail, "Total_Shares": total,
                 "Outlet_ID": outlet_id, "PB": pb_val,
             }
-            for i, n in enumerate(sorted(int(x) for x in sels), 1):
+            for i, n in enumerate(sels, 1):
                 row[f"w{i}"] = n
             rows.append(row)
     return rows
@@ -3264,19 +2948,9 @@ def sweep_state_picks(state: str, workers: int = _PICKS_MAX_WORKERS,
     out_path = save_path or (DIRS["Global_Scraper"] / f"D_{state}.csv")
     cols = _picks_columns(all_rows)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    import os as _os
-    tmp_path = out_path.with_suffix(".tmp")
-    try:
-        with open(tmp_path, "w", newline="") as f:
-            w = _csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
-            w.writeheader(); w.writerows(all_rows)
-        _os.replace(tmp_path, out_path)
-    except Exception:
-        try:
-            tmp_path.unlink()
-        except FileNotFoundError:
-            pass
-        raise
+    with open(out_path, "w", newline="") as f:
+        w = _csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+        w.writeheader(); w.writerows(all_rows)
     print(f"  saved {len(all_rows)} unique rows (deduped from {before}) -> {out_path}")
     return all_rows
 
@@ -3382,492 +3056,45 @@ def slice_variables(w_mat: pd.DataFrame) -> dict:
             "So": pd.DataFrame({"So_union": so_union})}
 
 
-# ── Shared fetch helper: urllib (SSL-bypass) → requests fallback ─────────────
-_FETCH_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-
-def _fetch_html(url: str, timeout: int = 30) -> str | None:
-    """Fetch URL as text using urllib with SSL bypass; falls back to requests.
-
-    Returns HTML string or None on failure.
-    """
-    import urllib.request as _ur
-    # ── attempt 1: urllib + SSL bypass (handles Mac cert issues) ────────────
-    try:
-        req = _ur.Request(url, headers={"User-Agent": _FETCH_UA})
-        return _ur.urlopen(req, timeout=timeout, context=_ssl_ctx()).read().decode("utf-8", "ignore")
-    except Exception:
-        pass
-    # ── attempt 2: requests with SSL verification disabled ───────────────────
-    if REQ_OK:
-        try:
-            import warnings, urllib3
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                try:
-                    urllib3.disable_warnings()
-                except Exception:
-                    pass
-                resp = requests.get(url, headers={"User-Agent": _FETCH_UA},
-                                    timeout=timeout, verify=False)
-                resp.raise_for_status()
-                return resp.text
-        except Exception:
-            pass
-    return None
-
-
-def _bs4_find_tables(html: str):
-    """Parse HTML with BeautifulSoup and return list of (headers_lower, rows).
-
-    headers_lower : list[str]   — column header text, lowercased
-    rows          : list[list[str]] — cell text per body row
-    Falls back gracefully if bs4 unavailable.
-    """
-    result = []
-    if not REQ_OK:
-        return result
-    try:
-        soup = BeautifulSoup(html, "html.parser")
-        for table in soup.find_all("table"):
-            # Collect header row(s)
-            headers = []
-            thead = table.find("thead")
-            if thead:
-                for th in thead.find_all(["th", "td"]):
-                    headers.append(th.get_text(strip=True).lower())
-            if not headers:
-                first_row = table.find("tr")
-                if first_row:
-                    headers = [c.get_text(strip=True).lower()
-                               for c in first_row.find_all(["th", "td"])]
-            # Collect data rows
-            body_rows = []
-            tbody = table.find("tbody")
-            src = tbody if tbody else table
-            for tr in src.find_all("tr"):
-                cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-                if cells and any(c for c in cells):
-                    body_rows.append(cells)
-            if headers and body_rows:
-                # Drop header row if it accidentally ended up in body_rows
-                if body_rows and [c.lower() for c in body_rows[0]] == headers:
-                    body_rows = body_rows[1:]
-                result.append((headers, body_rows))
-    except Exception:
-        pass
-    return result
-
-
-def fetch_number_frequencies(url: str, pool: int):
-    """Scrape the full number-frequency table from a lottolyzer frequencies page.
-
-    Returns a DataFrame with columns:
-        number, winning_no, powerball, overall, from_last, since_last, avg_draw
-    Numbers outside 1..pool are dropped.  Returns None on failure.
-    Tries pd.read_html first; falls back to BeautifulSoup direct parsing.
-    """
-    html = _fetch_html(url)
-    if not html:
-        return None
-
-    COL_MAP = {
-        "number":     ["number", "no", "no.", "ball"],
-        "winning_no": ["winning no", "winning no.", "winning", "wins", "times drawn", "drawn"],
-        "powerball":  ["powerball", "pb"],
-        "overall":    ["overall", "total", "total drawn"],
-        "from_last":  ["from last", "last drawn", "from last draw"],
-        "since_last": ["since last", "since", "games since", "last seen", "draws since"],
-        "avg_draw":   ["avg draw", "average", "avg", "avg gap"],
-    }
-
-    def _find_col(cols_lower, keys):
-        for c_lower, c_orig in cols_lower.items():
-            for k in keys:
-                if k in c_lower:
-                    return c_orig
-        return None
-
-    def _parse_pd_tables(tables):
-        for t in tables:
-            cols_lower = {str(c).strip().lower(): c for c in t.columns}
-            num_c = _find_col(cols_lower, COL_MAP["number"])
-            sl_c  = _find_col(cols_lower, COL_MAP["since_last"])
-            if not (num_c and sl_c):
-                continue
-            rows = []
-            for _, row in t.iterrows():
-                try:
-                    n = int(float(str(row[num_c]).strip()))
-                    if not (1 <= n <= pool):
-                        continue
-                    def _get(key, _cl=cols_lower, _r=row):
-                        c = _find_col(_cl, COL_MAP[key])
-                        if c is None:
-                            return None
-                        try:
-                            return int(float(str(_r[c]).strip()))
-                        except Exception:
-                            return None
-                    rows.append({
-                        "number":     n,
-                        "winning_no": _get("winning_no"),
-                        "powerball":  _get("powerball"),
-                        "overall":    _get("overall"),
-                        "from_last":  _get("from_last"),
-                        "since_last": _get("since_last"),
-                        "avg_draw":   _get("avg_draw"),
-                    })
-                except Exception:
-                    pass
-            if rows:
-                return pd.DataFrame(rows).sort_values("number").reset_index(drop=True)
-        return None
-
-    # ── primary: pd.read_html ───────────────────────────────────────────────
-    try:
-        result = _parse_pd_tables(pd.read_html(html))
-        if result is not None:
-            return result
-    except Exception:
-        pass
-
-    # ── fallback: BeautifulSoup direct parse ────────────────────────────────
-    for headers, body_rows in _bs4_find_tables(html):
-        def _col_idx(keys):
-            for i, h in enumerate(headers):
-                for k in keys:
-                    if k in h:
-                        return i
-            return None
-        num_i = _col_idx(COL_MAP["number"])
-        sl_i  = _col_idx(COL_MAP["since_last"])
-        if num_i is None or sl_i is None:
-            continue
-        rows = []
-        for cells in body_rows:
-            try:
-                n = int(float(cells[num_i]))
-                if not (1 <= n <= pool):
-                    continue
-                def _geti(i, _cells=cells):
-                    try:
-                        return int(float(_cells[i])) if i < len(_cells) else None
-                    except Exception:
-                        return None
-                rows.append({
-                    "number":     n,
-                    "winning_no": _geti(_col_idx(COL_MAP["winning_no"]) or -1),
-                    "powerball":  _geti(_col_idx(COL_MAP["powerball"]) or -1),
-                    "overall":    _geti(_col_idx(COL_MAP["overall"]) or -1),
-                    "from_last":  _geti(_col_idx(COL_MAP["from_last"]) or -1),
-                    "since_last": _geti(sl_i),
-                    "avg_draw":   _geti(_col_idx(COL_MAP["avg_draw"]) or -1),
-                })
-            except Exception:
-                pass
-        if rows:
-            return pd.DataFrame(rows).sort_values("number").reset_index(drop=True)
-    return None
-
-
-def fetch_draw_history(game_key: str, pages: int = 3):
-    """Scrape draw-history pages from lottolyzer for the given game.
-
-    Returns a DataFrame with columns: draw, date, numbers (sorted), powerball.
-    Rows are newest first.  Returns None if unreachable or can't be parsed.
-    Tries pd.read_html first; falls back to BeautifulSoup direct parsing.
-    """
-    gcfg = GAMES_CFG.get(game_key, {})
-    freq_url = gcfg.get("lottolyzer", "")
-    if not freq_url:
-        return None
-    # Use explicit history_url if provided; otherwise derive it from the
-    # frequency URL by substituting /number-frequencies/ → /history/.
-    hist_base = gcfg.get("history_url") or freq_url.replace("/number-frequencies/", "/history/")
-    all_rows = []
-
-    _DRAW_KEYS  = ("draw", "draw no", "draw no.", "draw number")
-    _NUM_KEYS   = lambda k: "winning" in k or k == "numbers"
-    _DATE_KEYS  = lambda k: "date" in k
-    _PB_KEYS    = lambda k: "powerball" in k or k == "pb"
-
-    def _extract_rows_from_pd_table(t):
-        cols_lower = {str(c).strip().lower(): c for c in t.columns}
-        draw_c = next((cols_lower[k] for k in cols_lower if k in _DRAW_KEYS), None)
-        num_c  = next((cols_lower[k] for k in cols_lower if _NUM_KEYS(k)), None)
-        date_c = next((cols_lower[k] for k in cols_lower if _DATE_KEYS(k)), None)
-        pb_c   = next((cols_lower[k] for k in cols_lower if _PB_KEYS(k)), None)
-        if not num_c:
-            return []
-        found = []
-        for _, row in t.iterrows():
-            try:
-                raw_nums = str(row[num_c]).strip()
-                # Skip header-repeat rows (lottolyzer repeats <thead> content as
-                # <td> rows in <tbody>). If the "winning numbers" cell contains no
-                # digits at all it must be a header row — skip it.
-                if not re.search(r'\d', raw_nums):
-                    continue
-                nums = sorted([int(x) for x in re.split(r"[,\s]+", raw_nums)
-                               if x.strip().isdigit()])
-                if not nums:
-                    continue
-                date_str = str(row[date_c]).strip() if date_c else ""
-                # Derive draw number.
-                # Powerball: lottolyzer "Draw" column is a real sequential integer.
-                # All other games: "Draw" column contains a date (MM/DD/YYYY).
-                # For non-Powerball we derive draw_no as YYYYMMDD from the date value
-                # so we get a stable, unique key that sorts chronologically.
-                draw_val = str(row[draw_c]).strip() if draw_c else ""
-                if re.match(r'^\d{1,2}/\d{1,2}/\d{4}$', draw_val) or \
-                        re.match(r'^\d{4}-\d{2}-\d{2}$', draw_val):
-                    # Date string in the Draw column → derive YYYYMMDD
-                    try:
-                        _dt = pd.to_datetime(draw_val, dayfirst=False)
-                        draw_no = int(_dt.strftime("%Y%m%d"))
-                    except Exception:
-                        if date_str:
-                            try:
-                                _dt = pd.to_datetime(date_str)
-                                draw_no = int(_dt.strftime("%Y%m%d"))
-                            except Exception:
-                                continue
-                        else:
-                            continue
-                else:
-                    try:
-                        draw_no = int(float(draw_val))
-                    except Exception:
-                        # Fallback: use date column if draw column is unusable
-                        if date_str:
-                            try:
-                                _dt = pd.to_datetime(date_str)
-                                draw_no = int(_dt.strftime("%Y%m%d"))
-                            except Exception:
-                                continue
-                        else:
-                            continue
-                pb = None
-                if pb_c:
-                    try:
-                        pb = int(float(str(row[pb_c]).strip()))
-                    except Exception:
-                        pass
-                found.append({"draw": draw_no, "date": date_str,
-                              "numbers": nums, "powerball": pb})
-            except Exception:
-                pass
-        return found
-
-    def _extract_rows_from_bs4_table(headers, body_rows):
-        def _ci(pred):
-            return next((i for i, h in enumerate(headers) if pred(h)), None)
-        draw_i = _ci(lambda h: h in _DRAW_KEYS)
-        num_i  = _ci(lambda h: _NUM_KEYS(h))
-        date_i = _ci(lambda h: _DATE_KEYS(h))
-        pb_i   = _ci(lambda h: _PB_KEYS(h))
-        if num_i is None:
-            return []
-        found = []
-        for cells in body_rows:
-            try:
-                raw_nums = cells[num_i] if num_i < len(cells) else ""
-                # Skip header-repeat rows — winning numbers cell must contain digits
-                if not re.search(r'\d', raw_nums):
-                    continue
-                nums = sorted([int(x) for x in re.split(r"[,\s]+", raw_nums)
-                               if x.strip().isdigit()])
-                if not nums:
-                    continue
-                date_str = cells[date_i] if date_i is not None and date_i < len(cells) else ""
-                # Derive draw number (same logic as pd path above)
-                draw_val = cells[draw_i] if draw_i is not None and draw_i < len(cells) else ""
-                if re.match(r'^\d{1,2}/\d{1,2}/\d{4}$', draw_val) or \
-                        re.match(r'^\d{4}-\d{2}-\d{2}$', draw_val):
-                    try:
-                        _dt = pd.to_datetime(draw_val, dayfirst=False)
-                        draw_no = int(_dt.strftime("%Y%m%d"))
-                    except Exception:
-                        if date_str:
-                            try:
-                                _dt = pd.to_datetime(date_str)
-                                draw_no = int(_dt.strftime("%Y%m%d"))
-                            except Exception:
-                                continue
-                        else:
-                            continue
-                else:
-                    try:
-                        draw_no = int(float(draw_val))
-                    except Exception:
-                        if date_str:
-                            try:
-                                _dt = pd.to_datetime(date_str)
-                                draw_no = int(_dt.strftime("%Y%m%d"))
-                            except Exception:
-                                continue
-                        else:
-                            continue
-                pb = None
-                if pb_i is not None and pb_i < len(cells):
-                    try:
-                        pb = int(float(cells[pb_i]))
-                    except Exception:
-                        pass
-                found.append({"draw": draw_no, "date": date_str,
-                              "numbers": nums, "powerball": pb})
-            except Exception:
-                pass
-        return found
-
-    for pg in range(1, pages + 1):
-        url = f"{hist_base}/page/{pg}/per-page/50/summary-view"
-        html = _fetch_html(url)
-        if not html:
-            break
-
-        # ── primary: pd.read_html ─────────────────────────────────────────
-        page_found = False
-        try:
-            for t in pd.read_html(html):
-                rows = _extract_rows_from_pd_table(t)
-                if rows:
-                    all_rows.extend(rows)
-                    page_found = True
-                    break
-        except Exception:
-            pass
-
-        # ── fallback: BeautifulSoup ───────────────────────────────────────
-        if not page_found:
-            for headers, body_rows in _bs4_find_tables(html):
-                rows = _extract_rows_from_bs4_table(headers, body_rows)
-                if rows:
-                    all_rows.extend(rows)
-                    page_found = True
-                    break
-
-    if not all_rows:
-        return None
-    df = pd.DataFrame(all_rows).drop_duplicates(subset=["draw"]).sort_values(
-        "draw", ascending=False).reset_index(drop=True)
-    return df
-
-
-def append_draw_to_b(b_df: pd.DataFrame, numbers: list,
-                     draw_label: str = "") -> pd.DataFrame:
-    """Append a new draw (sorted list of ints) to a B DataFrame.
-
-    Handles both row-oriented B (col 'w' = label, pos_1/pos_2/… = numbers)
-    and legacy column-oriented B (each column = a w-set).
-    Existing rows are NEVER modified.  Returns unchanged b_df if numbers is empty.
-    """
-    if not numbers:
-        return b_df
-    nums = sorted([int(n) for n in numbers if n >= 1])
-
-    # ── Row-oriented format (preferred) ───────────────────────────────────────
-    is_row_oriented = (isinstance(b_df, pd.DataFrame)
-                       and not b_df.empty
-                       and "w" in b_df.columns)
-    if b_df is None or b_df.empty:
-        # Default to row-oriented for new B
-        label = draw_label or "w1"
-        row = {"w": label}
-        row.update({f"pos_{i+1}": n for i, n in enumerate(nums)})
-        return pd.DataFrame([row])
-
-    if is_row_oriented:
-        label = draw_label or f"w{len(b_df) + 1}"
-        row = {"w": label}
-        row.update({f"pos_{i+1}": n for i, n in enumerate(nums)})
-        new_row_df = pd.DataFrame([row])
-        return pd.concat([b_df, new_row_df], ignore_index=True)
-
-    # ── Legacy column-oriented format ─────────────────────────────────────────
-    new_df = b_df.copy()
-    n_existing = len(new_df)
-    for i, n in enumerate(nums):
-        wcol = f"w{i+1}"
-        if wcol in new_df.columns:
-            new_row = pd.Series([pd.NA] * n_existing + [n], dtype="Int64")
-            new_df[wcol] = new_row.values
-        else:
-            col_data = [pd.NA] * n_existing + [n]
-            new_df[wcol] = pd.array(col_data, dtype="Int64")
-    return new_df
-
-
-
 def fetch_since_last(url: str, pool: int) -> dict | None:
     """Best-effort scrape of a lottolyzer number-frequencies page.
 
     Returns {number: since_last} for numbers 1..pool, or None if the page
     can't be parsed (in which case the caller falls back to manual upload).
-    Tries urllib+SSL-bypass first, then requests fallback; parses with
-    pd.read_html first, then BeautifulSoup fallback.
+    Runs on the user's machine (this app has network); kept defensive because
+    lottolyzer's markup can change.
     """
-    html = _fetch_html(url)
-    if not html:
-        return None
-
-    _NUM_KEYS = ("number", "no", "no.", "ball")
-    _SL_KEYS  = ("since", "games since", "last seen", "draws since")
-
-    def _dict_from_pd(tables):
-        for t in tables:
-            cols = {str(c).strip().lower(): c for c in t.columns}
-            num_c = next((cols[k] for k in cols
-                          if k in _NUM_KEYS or "number" in k), None)
-            sl_c  = next((cols[k] for k in cols
-                          if any(sk in k for sk in _SL_KEYS)), None)
-            if not (num_c and sl_c):
-                continue
-            d = {}
-            for _, row in t.iterrows():
-                try:
-                    n = int(float(str(row[num_c]).strip()))
-                    s = int(float(str(row[sl_c]).strip()))
-                    if 1 <= n <= pool:
-                        d[n] = s
-                except (ValueError, TypeError):
-                    pass
-            if d:
-                return d
-        return None
-
-    def _dict_from_bs4(tables):
-        for headers, body_rows in tables:
-            num_i = next((i for i, h in enumerate(headers)
-                          if h in _NUM_KEYS or "number" in h), None)
-            sl_i  = next((i for i, h in enumerate(headers)
-                          if any(sk in h for sk in _SL_KEYS)), None)
-            if num_i is None or sl_i is None:
-                continue
-            d = {}
-            for cells in body_rows:
-                try:
-                    n = int(float(cells[num_i]))
-                    s = int(float(cells[sl_i]))
-                    if 1 <= n <= pool:
-                        d[n] = s
-                except (ValueError, TypeError, IndexError):
-                    pass
-            if d:
-                return d
-        return None
-
-    # ── primary: pd.read_html ───────────────────────────────────────────────
     try:
-        result = _dict_from_pd(pd.read_html(html))
-        if result:
-            return result
+        import urllib.request
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                         "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                         "Chrome/124.0 Safari/537.36"})
+        html = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "ignore")
+        tables = pd.read_html(html)            # needs lxml/bs4 (usually present)
     except Exception:
-        pass
-
-    # ── fallback: BeautifulSoup direct parse ────────────────────────────────
-    return _dict_from_bs4(_bs4_find_tables(html))
+        return None
+    # Find the table that has a Number column and a "Since Last"-type column.
+    for t in tables:
+        cols = {str(c).strip().lower(): c for c in t.columns}
+        num_c = next((cols[k] for k in cols
+                      if k in ("number", "no", "no.", "ball") or "number" in k), None)
+        sl_c = next((cols[k] for k in cols
+                     if "since" in k or "games since" in k or "last seen" in k), None)
+        if not (num_c and sl_c):
+            continue
+        d = {}
+        for _, row in t.iterrows():
+            try:
+                n = int(float(str(row[num_c]).strip()))
+                s = int(float(str(row[sl_c]).strip()))
+                if 1 <= n <= pool:
+                    d[n] = s
+            except (ValueError, TypeError):
+                pass
+        if d:
+            return d
+    return None
 
 
 def save_since_last(sl_dict: dict, game_key: str, label: str, pool: int,
@@ -3889,72 +3116,17 @@ def save_since_last(sl_dict: dict, game_key: str, label: str, pool: int,
     return data
 
 
-def _last_draw_date(game_key: str):
-    """Return the most recent completed draw date for this game (date object or None).
-
-    Uses the draw_day field from GAMES_CFG and today's date to find the last
-    weekday matching the draw schedule.  Returns None for unknown schedules.
-    """
-    from datetime import date, timedelta
-    gcfg = GAMES_CFG.get(game_key, {})
-    draw_day = gcfg.get("draw_day", "")
-    WEEKDAY = {"Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3,
-               "Friday": 4, "Saturday": 5, "Sunday": 6}
-    today = date.today()
-    if draw_day == "Daily":
-        return today
-    # Mon/Wed/Fri draws
-    if "Mon" in draw_day and "Wed" in draw_day:
-        target_days = {0, 2, 4}
-    else:
-        wd = WEEKDAY.get(draw_day)
-        if wd is None:
-            return None
-        target_days = {wd}
-    for delta in range(7):
-        check = today - timedelta(days=delta)
-        if check.weekday() in target_days:
-            return check
-    return None
-
-
-def _data_freshness_banner(scraped_at_iso: str, game_key: str) -> tuple[str, str]:
-    """Return (css_class, message) describing whether the cached data is current.
-
-    'ok'   → scraped after the last scheduled draw
-    'warn' → scraped before the last scheduled draw (data is stale)
-    'note' → can't determine staleness
-    """
-    last_draw = _last_draw_date(game_key)
-    if last_draw is None or not scraped_at_iso or scraped_at_iso == "unknown":
-        return "note", "Cannot determine data currency."
-    try:
-        from datetime import datetime as _dt
-        scraped_dt = _dt.fromisoformat(scraped_at_iso).date()
-    except Exception:
-        return "note", f"Scraped: {scraped_at_iso[:16]}"
-    scraped_str = scraped_dt.strftime("%-d %b %Y")
-    draw_str    = last_draw.strftime("%-d %b %Y")
-    if scraped_dt >= last_draw:
-        return "ok", (f"✅ Data is current — scraped {scraped_str}, "
-                      f"last draw was {draw_str}.")
-    else:
-        return "warn", (f"⚠️ Data may be stale — scraped {scraped_str} but "
-                        f"last draw was {draw_str}. "
-                        f"Click <b>Fetch now</b> to refresh.")
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # 8b. AUTO-WIRE GENERATORS — runs Sp / So (and Ep if B+R ready) from D
 # ═══════════════════════════════════════════════════════════════════════════════
-def _auto_wire_generators(gdirs: dict, gk: str):
+def _auto_wire_generators(gdirs: dict, gkey: str):
     """Auto-run Sp, So (and Ep when B+R are available) immediately after D loads.
 
     Uses prepare_d_input_sets to peel the 4/8 longest D rows (w1,w2,w3,w4…) as
     column-oriented sets, then feeds them to the generators. Results are stored
-    in st.session_state and written to disk so subsequent tabs show them instantly.
+    in S and written to disk so subsequent tabs show them instantly.
     """
-    d_df = st.session_state.get(f"D__{gk}", pd.DataFrame())
+    d_df = S.get("D", pd.DataFrame())
     if d_df is None or d_df.empty:
         return
 
@@ -3967,9 +3139,9 @@ def _auto_wire_generators(gdirs: dict, gk: str):
         if not sp_input.empty:
             sp_df = generate_splits(sp_input)
             if not sp_df.empty:
-                st.session_state[f"Sp__{gk}"] = sp_df
-                sp_path = gdirs["Splits"] / f"Sp_{gk}.csv"
-                _sets_df_to_rows(sp_df, set_col="set").to_csv(sp_path, index=False)
+                S["Sp"] = sp_df
+                sp_path = gdirs["Splits"] / f"Sp_{gkey}.csv"
+                sp_df.to_csv(sp_path, index=False)
                 msgs.append(f"Sp ({sp_df.shape[1]} cols)")
     except Exception as _sp_ex:
         msgs.append(f"Sp error: {_sp_ex}")
@@ -3980,16 +3152,16 @@ def _auto_wire_generators(gdirs: dict, gk: str):
         if not so_input.empty:
             so_df = generate_splits_combi(so_input)
             if not so_df.empty:
-                st.session_state[f"So__{gk}"] = so_df
-                so_path = gdirs["Splits_Combi"] / f"So_{gk}.csv"
-                _sets_df_to_rows(so_df, set_col="set").to_csv(so_path, index=False)
+                S["So"] = so_df
+                so_path = gdirs["Splits_Combi"] / f"So_{gkey}.csv"
+                so_df.to_csv(so_path, index=False)
                 msgs.append(f"So ({so_df.shape[1]} cols)")
     except Exception as _so_ex:
         msgs.append(f"So error: {_so_ex}")
 
     # ── Ep (ExcelPro) — requires R's wt list ───────────────────────────────
-    b_df = st.session_state.get(f"B__{gk}", pd.DataFrame())
-    r_wt_df = st.session_state.get(f"_R_wt__{gk}", pd.DataFrame())
+    b_df = S.get("B", pd.DataFrame())
+    r_wt_df = S.get("_R_wt", pd.DataFrame())
     if not b_df.empty and not r_wt_df.empty:
         try:
             ep_objs = prepare_ep_objects(d_df, mode="pairs")  # 8 longest rows → 4 pairs
@@ -4000,9 +3172,9 @@ def _auto_wire_generators(gdirs: dict, gk: str):
             if ep_objs and wt_list:
                 ep_df = generate_excelpro(ep_objs, wt_list)
                 if not ep_df.empty:
-                    st.session_state[f"Ep__{gk}"] = ep_df
-                    ep_path = gdirs["ExcelPro"] / f"Ep_{gk}.csv"
-                    _sets_df_to_rows(ep_df, set_col="set").to_csv(ep_path, index=False)
+                    S["Ep"] = ep_df
+                    ep_path = gdirs["ExcelPro"] / f"Ep_{gkey}.csv"
+                    ep_df.to_csv(ep_path, index=False)
                     msgs.append(f"Ep ({ep_df.shape[1]} cols)")
         except Exception as _ep_ex:
             msgs.append(f"Ep error: {_ep_ex}")
@@ -4017,27 +3189,21 @@ def _auto_wire_generators(gdirs: dict, gk: str):
 # 9. UI HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
 def am_toggle(section: str) -> str:
-    """Global Auto/Manual toggle — ONE state shared across ALL pages.
-    Clicking AUTO or MANUAL anywhere sets it site-wide and reruns immediately,
-    so no page can silently break the auto chain.
-    """
-    # ── Read / initialise global state ────────────────────────────────────
-    mode = S["auto"].get("_global", "Manual")
-
-    c1, c2, _ = st.columns([1, 1, 8])
+    """Auto/Manual toggle — every page."""
+    if section not in S["auto"]:
+        S["auto"][section] = "Manual"
+    c1, c2, _ = st.columns([1,1,8])
     with c1:
         if st.button("▶ AUTO", key=f"_a_{section}",
-                     type="primary" if mode == "Auto" else "secondary",
+                     type="primary" if S["auto"][section]=="Auto" else "secondary",
                      use_container_width=True):
-            S["auto"]["_global"] = "Auto"
-            st.rerun()
+            S["auto"][section] = "Auto"
     with c2:
         if st.button("✋ MANUAL", key=f"_m_{section}",
-                     type="primary" if mode == "Manual" else "secondary",
+                     type="primary" if S["auto"][section]=="Manual" else "secondary",
                      use_container_width=True):
-            S["auto"]["_global"] = "Manual"
-            st.rerun()
-    return mode
+            S["auto"][section] = "Manual"
+    return S["auto"][section]
 
 
 def edit_var(var_key: str, folder: Path, filename: str, label: str, note=""):
@@ -4304,96 +3470,44 @@ with st.expander("🕷️ Global Scraper — sweep all states, all games", expan
         )
 
         def _run_sweep(states_to_sweep: list):
-            """Launch sweep as a subprocess — opens a visible Terminal window on Mac."""
-            import subprocess as _sp, tempfile as _tf, os as _os
-
-            script_dir = Path(__file__).resolve().parent
-
-            # Apply smart_skip before deciding which states to launch
-            states_filtered = []
-            for _sw_state in states_to_sweep:
-                _sw_row = next(r for r in status_rows if r["state"] == _sw_state)
-                if smart_skip and _sw_row["exists"] and _sw_row["age_h"] < 6:
+            """Execute sweep for given list of states, saving each immediately."""
+            for state in states_to_sweep:
+                row = next(r for r in status_rows if r["state"] == state)
+                if smart_skip and row["exists"] and row["age_h"] < 6:
                     st.markdown(
-                        f'<div class="info">⏭️ <b>{_sw_state}</b> skipped — data is only '
-                        f'{_sw_row["age_h"]}h old (smart skip on).</div>',
+                        f'<div class="info">⏭️ <b>{state}</b> skipped — data is only '
+                        f'{row["age_h"]}h old (smart skip on).</div>',
                         unsafe_allow_html=True)
                     continue
-                states_filtered.append(_sw_state)
 
-            if not states_filtered:
-                return
+                pcs = list(SWEEP_POSTCODES[state])
+                if max_pc:
+                    pcs = pcs[:max_pc]
 
-            label = ", ".join(states_filtered)
-            states_repr = repr(states_filtered)
+                out_path = DIRS["Global_Scraper"] / f"D_{state}.csv"
+                st.markdown(f"**▶ Sweeping {state} — {len(pcs):,} postcodes…**")
+                pb  = st.progress(0)
+                stx = st.empty()
 
-            # Build a self-deleting temp script so Terminal cleans up after itself
-            py_code = "\n".join([
-                "import sys, os",
-                f"sys.path.insert(0, {repr(str(script_dir))})",
-                "from masterapp import sweep_state_picks",
-                f"for s in {states_repr}:",
-                "    print(f'=== Sweeping {s} ===')",
-                "    sweep_state_picks(s)",
-                "print('=== All done. ===')",
-            ]) + "\n"
+                df_result = _sweep_state_thelott(state, pcs, pb, stx)
+                pb.empty()
 
-            _tmp = _tf.NamedTemporaryFile(
-                mode='w', suffix='.py', delete=False, dir='/tmp', prefix='sweep_')
-            _tmp.write(py_code)
-            _tmp.close()
-
-            # ── Preference 1: visible Terminal window via osascript ───────────
-            _apple = (
-                f'tell application "Terminal" to do script '
-                f'"python3 {_tmp.name}"'
-            )
-            _launched = False
-            try:
-                _r = _sp.run(["osascript", "-e", _apple],
-                             timeout=5, capture_output=True)
-                if _r.returncode == 0:
-                    _launched = True
-                    S["scrape_log"].append(
-                        f"{datetime.now():%Y-%m-%d %H:%M}  [{label}]  launched in Terminal")
+                if not df_result.empty:
+                    df_result.to_csv(out_path, index=False)
                     st.markdown(
-                        f'<div class="ok">✅ Sweep launched in Terminal for: <b>{label}</b>. '
-                        f'Watch progress there — click <b>🔄 Scan Main_Data folder</b> '
-                        f'or switch tabs when done to refresh the status.</div>',
+                        f'<div class="ok">✅ <b>{state}</b>: {len(df_result):,} syndicates '
+                        f'→ <code>{out_path.name}</code></div>',
                         unsafe_allow_html=True)
-            except Exception:
-                pass
-
-            # ── Preference 2: silent background subprocess with spinner ───────
-            if not _launched:
-                st.markdown(
-                    f'<div class="info">⚙️ Terminal unavailable — running sweep for '
-                    f'<b>{label}</b> in background…</div>',
-                    unsafe_allow_html=True)
-                with st.spinner(f"Sweeping {label} — this may take several minutes…"):
-                    _proc = _sp.Popen(
-                        ["python3", _tmp.name],
-                        stdout=_sp.PIPE, stderr=_sp.PIPE)
-                    _out, _err = _proc.communicate()
-                try:
-                    _os.unlink(_tmp.name)
-                except Exception:
-                    pass
-                if _proc.returncode == 0:
-                    st.markdown(
-                        f'<div class="ok">✅ Sweep complete for: <b>{label}</b>.</div>',
-                        unsafe_allow_html=True)
+                    show_paginated_df(df_result, key=f"scrape_result_{state}", use_container_width=True)
                     S["scrape_log"].append(
-                        f"{datetime.now():%Y-%m-%d %H:%M}  [{label}]  background sweep complete")
+                        f"{datetime.now():%Y-%m-%d %H:%M}  {state}  {len(df_result):,} rows")
                 else:
-                    _err_txt = _err.decode(errors='replace')[:400]
                     st.markdown(
-                        f'<div class="warn">⚠️ Sweep for <b>{label}</b> exited with errors: '
-                        f'<pre>{_err_txt}</pre></div>',
+                        f'<div class="warn">⚠️ <b>{state}</b>: 0 syndicates found. '
+                        f'Check connectivity or try again later.</div>',
                         unsafe_allow_html=True)
                     S["scrape_log"].append(
-                        f"{datetime.now():%Y-%m-%d %H:%M}  [{label}]  error: {_err_txt[:100]}")
-                st.rerun()
+                        f"{datetime.now():%Y-%m-%d %H:%M}  {state}  0 rows — possible block")
 
         if triggered_state:
             _run_sweep([triggered_state])
@@ -4530,9 +3644,9 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
                 games_touched = set()
                 for res in all_results.values():
                     for gkey, count in res.items():
-                        if gkey.startswith("_") or gkey == "error":
+                        if gkey.startswith("_"):
                             continue
-                        if isinstance(count, int) and count > 0:
+                        if count and count > 0:
                             games_touched.add(gkey)
                 combine_rows = []
                 for gkey in sorted(games_touched):
@@ -4561,17 +3675,11 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
                     skipped  = res.pop("_skipped_games", [])
                     all_unknowns.update(unknowns)
                     all_skipped.update(skipped)
-                    err_msg = res.pop("error", None)
-                    if err_msg:
-                        st.error(f"Split failed for {fname}: {err_msg}")
-                        continue
                     for gkey, count in res.items():
-                        if not isinstance(count, int):
-                            continue
                         if count > 0:
                             summary_rows.append({
                                 "Source file":   fname,
-                                "Game":          GAMES_CFG.get(gkey, {}).get("label", gkey),
+                                "Game":          GAMES_CFG[gkey]["label"],
                                 "Rows written":  f"{count:,}",
                                 "Saved to":      f"Games/{gkey.upper()}/Games_Breakdown/",
                             })
@@ -4599,50 +3707,11 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
         else:
             st.info("No D_*.csv files in Main_Data/ yet. Run a sweep first.")
 
-        # ── Promote files to Direct/ ──────────────────────────────────────────
-        with st.expander("📤 Promote files to Direct/"):
+        # ── Single file promote (legacy) ──────────────────────────────────────
+        with st.expander("📤 Promote single file to Direct/ (legacy)"):
             promote_candidates = (sorted(DIRS["Global_Scraper"].glob("D_*.csv")) +
                                   sorted(active_game_dirs()["Scraper"].glob("D_*.csv")))
             if promote_candidates:
-                import shutil as _shutil_promote
-
-                # ── Button row: ALL states at once OR one at a time ───────────
-                st.markdown(
-                    '<div class="info">Choose <b>Promote ALL</b> to copy every '
-                    'state/territory file in one click, or use the selector below '
-                    'to promote a single file.</div>',
-                    unsafe_allow_html=True)
-
-                btn_all, btn_single_col = st.columns(2)
-
-                with btn_all:
-                    if st.button("📤 Promote ALL States/Territories to Direct/",
-                                 use_container_width=True, key="do_promote_all",
-                                 type="primary"):
-                        _direct = active_game_dirs()["Direct"]
-                        _done, _errs = [], []
-                        _prog = st.progress(0)
-                        for _fi, _fp in enumerate(promote_candidates):
-                            try:
-                                _dst = _direct / _fp.name
-                                _shutil_promote.copy2(_fp, _dst)
-                                _done.append(_fp.name)
-                            except Exception as _e:
-                                _errs.append(f"{_fp.name}: {_e}")
-                            _prog.progress((_fi + 1) / len(promote_candidates))
-                        _prog.empty()
-                        if _done:
-                            st.success(
-                                f"✅ Promoted {len(_done)} file(s) → "
-                                f"{_direct.parent.name}/{_direct.name}/\n\n" +
-                                "\n".join(f"• {n}" for n in _done))
-                        if _errs:
-                            st.error("Errors:\n" + "\n".join(_errs))
-
-                st.markdown("---")
-
-                # ── Single-file promote ───────────────────────────────────────
-                st.markdown("**Promote a single file:**")
                 chosen = st.selectbox("File to promote:",
                                       [f"{fp.parent.name}/{fp.name}"
                                        for fp in promote_candidates],
@@ -4657,11 +3726,12 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
                     st.write("")
                     if st.button("📤 Promote to Direct/",
                                  use_container_width=True, key="do_promote"):
+                        import shutil
                         dst = active_game_dirs()["Direct"] / chosen_fp.name
-                        _shutil_promote.copy2(chosen_fp, dst)
-                        gs_set("D", _load_file(dst))
+                        shutil.copy2(chosen_fp, dst)
+                        S["D"] = _load_file(dst)
                         st.success(f"Promoted → {dst.parent.name}/{chosen_fp.name} "
-                                   f"({len(gs('D', pd.DataFrame())):,} rows loaded)")
+                                   f"({len(S['D']):,} rows loaded)")
             else:
                 st.info("No D_*.csv files found.")
 
@@ -4815,12 +3885,11 @@ for _i, _gk in enumerate(GAME_KEYS):
             # immediately (before the user clicks the B tab).
             _b_new = _auto_load_b(_gk)
             if not _b_new.empty:
-                st.session_state[f"B__{_gk}"] = _b_new
+                S["B"] = _b_new
             st.rerun()
 
 _gcfg  = active_game_cfg()
 _gdirs = active_game_dirs()
-_gkey  = active_game()
 st.markdown(
     f'<div class="info">🎮 Active game: <b>{_gcfg["emoji"]} {_gcfg["label"]}</b> '
     f'— Pool: 1–{_gcfg["pool"]} · Pick {_gcfg["pick"]} · Draws: {_gcfg["draw_day"]} '
@@ -4829,7 +3898,7 @@ st.markdown(
 )
 st.markdown("---")
 
-page = st.radio("Page", [
+page = st.radio("", [
     "📥 Main Data",
     "🔄 CVI Matrix",
     "🧩 Variable Inputs",
@@ -4942,32 +4011,18 @@ mdb-export /path/to/file.accdb TableName > ~/Desktop/Sika/o_Automation_Suite/Gam
                     with st.spinner(f"Loading {fp.name}…"):
                         df_ex = _load_file(fp, numeric=False)
                     if not df_ex.empty:
-                        gs_set("main_data",      df_ex)
-                        gs_set("main_data_path", str(fp))
+                        S["main_data"]      = df_ex
+                        S["main_data_path"] = str(fp)
                         st.success(f"Loaded {fp.name}: {len(df_ex):,} rows")
                     else:
                         st.error(f"Could not read {fp.name}")
 
-    # ── Auto-load on game switch when exactly one file is present ─────────
-    _single_files = [f for f in existing if f.is_file()]
-    if S.get("main_data_auto_loaded_game") != _gkey and len(_single_files) == 1:
-        _auto_fp = _single_files[0]
-        st.markdown(
-            f'<div class="info">ℹ️ Auto-loading <b>{_auto_fp.name}</b> for '
-            f'{_gcfg["label"]}…</div>', unsafe_allow_html=True)
-        with st.spinner(f"Loading {_auto_fp.name}…"):
-            df_auto = _load_file(_auto_fp, numeric=False)
-        if not df_auto.empty:
-            gs_set("main_data",      df_auto)
-            gs_set("main_data_path", str(_auto_fp))
-            S["main_data_auto_loaded_game"] = _gkey
-
     # ── Auto-reload from disk if session state lost ────────────────────────
-    if gs("main_data", pd.DataFrame()).empty:
-        saved_path = gs("main_data_path", "")
+    if S.get("main_data", pd.DataFrame()).empty:
+        saved_path = S.get("main_data_path", "")
         if saved_path and Path(saved_path).exists():
             with st.spinner("Reloading main data from disk…"):
-                gs_set("main_data", _load_file(Path(saved_path), numeric=False))
+                S["main_data"] = _load_file(Path(saved_path), numeric=False)
         else:
             # Auto-load most recent file in folder
             auto_files = sorted(
@@ -4979,10 +4034,10 @@ mdb-export /path/to/file.accdb TableName > ~/Desktop/Sika/o_Automation_Suite/Gam
                     f'<div class="info">ℹ️ Auto-loading most recent file: '
                     f'<b>{newest.name}</b></div>', unsafe_allow_html=True)
                 with st.spinner(f"Loading {newest.name}…"):
-                    gs_set("main_data", _load_file(newest, numeric=False))
-                gs_set("main_data_path", str(newest))
+                    S["main_data"] = _load_file(newest, numeric=False)
+                S["main_data_path"] = str(newest)
 
-    md = gs("main_data", pd.DataFrame())
+    md = S.get("main_data", pd.DataFrame())
     if not md.empty:
         c1, c2, c3 = st.columns(3)
         c1.metric("Rows", f"{len(md):,}")
@@ -5070,109 +4125,104 @@ elif page == "🔄 CVI Matrix":
 
         if st.button("🔄 BUILD W-MATRIX & SLICE Ep / Sp / So",
                      type="primary", use_container_width=True):
-            # D stays as ROWS — transposing 355k syndicates into columns would
-            # require 355k spreadsheet columns (Excel limit = 16,384) and would
-            # freeze the app in memory.  Row orientation is correct here.
-            w_mat = df_raw
-            gs_set("D", w_mat)
+            # ROW-ORIENTATION NOTE: D now stays as ROWS (each syndicate = a row),
+            # because transposing hundreds of thousands of syndicates into columns
+            # exceeds the spreadsheet ceiling (~16k cols). Only transpose for small
+            # files; for large D we keep rows and just slice the placeholder sets.
+            EXCEL_COL_LIMIT = 16384
+            if len(df_raw) > EXCEL_COL_LIMIT:
+                st.info(f"Row orientation: {len(df_raw):,} syndicates exceed the "
+                        f"{EXCEL_COL_LIMIT:,}-column spreadsheet limit, so D is kept "
+                        f"as rows (no transpose). Collate directly in Container "
+                        f"Formula — the CVI stacks w-sets as rows.")
+                w_mat = df_raw  # keep as rows; do not transpose
+            else:
+                with st.spinner("Building…"):
+                    w_mat = build_w_matrix(df_raw)
+            if w_mat.empty:
+                st.error("No number columns found. A D (syndicate) file needs "
+                         "w1…wN columns (main-data n1…nN is also accepted).")
+            else:
+                mfname = chosen_fp.name.replace("D_", "CVI_Matrix_")
+                cvi_out = _gdirs["CVI"] / mfname
+                w_mat.to_csv(cvi_out, index=False)
+                st.markdown(f'<div class="ok">✅ W-Matrix: {len(w_mat.columns):,} '
+                            f'w-sets · longest pick = {len(w_mat)} numbers '
+                            f'→ saved to Games/{_gkey.upper()}/</div>',
+                            unsafe_allow_html=True)
 
-            mfname = chosen_fp.name.replace("D_", "CVI_Matrix_")
-            cvi_out = _gdirs["CVI"] / mfname
-            w_mat.to_csv(cvi_out, index=False)
+                S["D"] = w_mat
 
-            _wcols_mat = [c for c in w_mat.columns if re.match(r'^w\d+$', str(c), re.I)]
-            st.markdown(
-                f'<div class="ok">✅ W-Matrix saved: {len(w_mat):,} syndicates · '
-                f'{len(_wcols_mat)} number positions → {cvi_out.name}</div>',
-                unsafe_allow_html=True)
+                # ── ROW VIEW: w label on the LEFT, numbers across each row ──
+                # The w-matrix as built has each w-set as a COLUMN (w1, w2, …).
+                # We transpose so that each row = one w-set and the leftmost
+                # column is the w label — longest pick at the top.
+                st.markdown("---")
+                st.markdown("### 📋 W-Matrix — row view (w label · numbers across · longest first)")
+                st.markdown(
+                    '<div class="info">Each row is one syndicate w-set. '
+                    'The <b>w</b> column on the left is the set name. '
+                    'Numbers run across to the right. '
+                    'Rows sorted <b>longest → shortest</b> (most numbers at top).</div>',
+                    unsafe_allow_html=True)
 
-            # ── Row-view preview (first 200 rows — no transpose needed) ──────
-            st.markdown("---")
-            st.markdown("### 📋 W-Matrix — row view (first 200 shown)")
-            st.markdown(
-                '<div class="info">Each row is one syndicate. '
-                'Numbers run across to the right (columns = number positions).</div>',
-                unsafe_allow_html=True)
-            _wm_preview = w_mat[_wcols_mat].head(200).copy()
-            _wm_preview.insert(0, "w", [f"w{i+1}" for i in range(len(_wm_preview))])
-            _wm_preview = _wm_preview.rename(
-                columns={wc: str(i+1) for i, wc in enumerate(_wcols_mat)})
-            show_paginated_df(_wm_preview, key="wmat_rows_view", use_container_width=True)
-            st.download_button(
-                f"⬇ Download W-Matrix (row view) — {len(w_mat):,} rows",
-                to_csv_bytes(w_mat),
-                mfname,
-                "text/csv",
-                key="dl_wmat_rows"
-            )
+                # Transpose: columns of w_mat become rows
+                _wcols_mat = [c for c in w_mat.columns if re.match(r'^w\d+$', str(c), re.I)]
+                _w_sub = w_mat[_wcols_mat]
+                # Each column is a w-set; T gives us: index=old col names, cols=row positions
+                _w_T = _w_sub.T.reset_index()
+                _w_T.columns = ["w"] + [f"pos_{i+1}" for i in range(_w_T.shape[1] - 1)]
+                # Sort by count of non-null values (longest first)
+                _w_T["_len"] = _w_T[[c for c in _w_T.columns if c.startswith("pos_")]].notna().sum(axis=1)
+                _w_T = _w_T.sort_values("_len", ascending=False).drop(columns=["_len"])
+                _w_T = _w_T.reset_index(drop=True)
 
-            # ── Sp and So: use only the 4 LONGEST syndicates from D ──────────
-            # (not all 355k — just the 4 with the most numbers picked)
-            st.markdown("---")
-            st.markdown("#### Variable slices (Sp · So)")
-            st.markdown(
-                '<div class="info">Sp and So use only the <b>4 longest</b> syndicates '
-                'from D as input sets — not the full file. Each set is split in half '
-                'and set-algebra combinations are computed.</div>',
-                unsafe_allow_html=True)
-            try:
-                _sp_input = prepare_d_input_sets(w_mat, 4)
-                if _sp_input.empty:
-                    st.warning("Could not extract the 4 longest rows from D. "
-                               "Check that the D file has w1…wN columns.")
-                else:
-                    st.markdown(
-                        f'<div class="ok">✅ D top-4 input sets ready: '
-                        f'{", ".join(_sp_input.columns.tolist())} — '
-                        f'lengths: {", ".join(str(_sp_input[c].notna().sum()) for c in _sp_input.columns)}'
-                        f'</div>',
-                        unsafe_allow_html=True)
+                # ── RENUMBERING TABLE: old_w → new_w after sort ───────────
+                st.markdown("#### 🔢 Renumbering — old position → new position after sort")
+                st.markdown(
+                    '<div class="note">After sorting longest → shortest, each w-set gets '
+                    'a new sequential number. This table shows the before/after mapping. '
+                    'The <b>old_w</b> column is dropped once you are satisfied with the '
+                    'new order.</div>',
+                    unsafe_allow_html=True)
+                _renum_rows = []
+                for _new_i, _old_w in enumerate(_w_T["w"].tolist()):
+                    _n_nums = int(w_mat[_old_w].notna().sum()) if _old_w in w_mat.columns else 0
+                    _renum_rows.append({
+                        "new_w":    f"w{_new_i + 1}",
+                        "old_w":    _old_w,
+                        "numbers":  _n_nums,
+                    })
+                _renum_df = pd.DataFrame(_renum_rows)
+                show_paginated_df(_renum_df, key="wmat_renum_df", use_container_width=True)
 
-                    # Sp
-                    _sp_df = generate_splits(_sp_input)
-                    if not _sp_df.empty:
-                        gs_set("Sp", _sp_df)
-                        _sp_path = _gdirs["Splits"] / f"Sp_{_gkey}.csv"
-                        _sets_df_to_rows(_sp_df, set_col="set").to_csv(_sp_path, index=False)
-                        st.markdown(f"**Sp — {_sp_df.shape[1]} split-combination sets**")
-                        show_paginated_df(
-                            _sets_df_to_rows(_sp_df, set_col="set"),
-                            key="cvi_slice_sp", use_container_width=True, height=200)
+                # Apply new w labels to the transposed view
+                _w_T.insert(0, "new_w", [f"w{i+1}" for i in range(len(_w_T))])
+                # Show preview (cap at 200 rows for display speed)
+                _show_n = min(200, len(_w_T))
+                if len(_w_T) > _show_n:
+                    st.caption(f"Preview — first {_show_n} of {len(_w_T):,} rows:")
+                show_paginated_df(_w_T, key="wmat_rows_view", use_container_width=True)
+                st.download_button(
+                    f"⬇ Download W-Matrix (row view) — {len(_w_T):,} rows",
+                    to_csv_bytes(_w_T),
+                    mfname.replace("CVI_Matrix_", "W_Rows_"),
+                    "text/csv",
+                    key="dl_wmat_rows"
+                )
 
-                    # So
-                    _so_df = generate_splits_combi(_sp_input)
-                    if not _so_df.empty:
-                        gs_set("So", _so_df)
-                        _so_path = _gdirs["Splits_Combi"] / f"So_{_gkey}.csv"
-                        _sets_df_to_rows(_so_df, set_col="set").to_csv(_so_path, index=False)
-                        st.markdown(f"**So — {_so_df.shape[1]} union-combination sets**")
-                        show_paginated_df(
-                            _sets_df_to_rows(_so_df, set_col="set"),
-                            key="cvi_slice_so", use_container_width=True, height=200)
-
-                    # Ep — needs R's wt list; skip silently if R not yet loaded
-                    _r_wt_btn = gs("_R_wt", pd.DataFrame())
-                    if not _r_wt_btn.empty:
-                        _ep_objs = prepare_ep_objects(w_mat, mode="pairs")
-                        _wt_list_btn = (_r_wt_btn["wt"].dropna().tolist()
-                                        if "wt" in _r_wt_btn.columns
-                                        else _r_wt_btn.iloc[:, 0].dropna().tolist())
-                        if _ep_objs and _wt_list_btn:
-                            _ep_df = generate_excelpro(_ep_objs, _wt_list_btn)
-                            if not _ep_df.empty:
-                                gs_set("Ep", _ep_df)
-                                _ep_path = _gdirs["ExcelPro"] / f"Ep_{_gkey}.csv"
-                                _sets_df_to_rows(_ep_df, set_col="set").to_csv(
-                                    _ep_path, index=False)
-                                st.markdown(f"**Ep — {_ep_df.shape[1]} ExcelPro sets**")
-                                show_paginated_df(
-                                    _sets_df_to_rows(_ep_df, set_col="set"),
-                                    key="cvi_slice_ep", use_container_width=True, height=200)
-                    else:
-                        st.info("ℹ️ Ep skipped — load R (Rainbow) first to supply the wt list, "
-                                "then press this button again.")
-            except Exception as _slice_ex:
-                st.error(f"Slice error: {_slice_ex}")
+                st.markdown("---")
+                st.markdown("#### Variable slices (Ep · Sp · So)")
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.markdown("**Ep** — top 8 w-sets")
+                    show_paginated_df(slices["Ep"], key="cvi_slice_ep", use_container_width=True, height=200)
+                with c2:
+                    st.markdown("**Sp** — top 4 lanes (a–d)")
+                    show_paginated_df(slices["Sp"], key="cvi_slice_sp", use_container_width=True, height=200)
+                with c3:
+                    st.markdown("**So** — union of Sp lanes")
+                    show_paginated_df(slices["So"], key="cvi_slice_so", use_container_width=True, height=200)
 
         # Browse existing CVI matrices for this game
         cvi_files = sorted(_gdirs["CVI"].glob("CVI_Matrix_*.csv"))
@@ -5228,7 +4278,7 @@ elif page == "🧩 Variable Inputs":
 
     vtabs = st.tabs(["B (Base)", "R (Rainbow)", "D (Direct)",
                      "Ep (ExcelPro)", "Sp (Splits)", "So (SplitsCombi)",
-                     "Since Last", "📊 Stats"])
+                     "Since Last"])
 
     # ── TAB: B (Base) ──────────────────────────────────────────────────────
     with vtabs[0]:
@@ -5271,68 +4321,102 @@ elif page == "🧩 Variable Inputs":
                                 pass
                         return out
 
-                    df_b = pd.DataFrame()
+                    b_data = {}
 
-                    # ── Strategy 0: col 0 has w-prefixed row labels (row-oriented) ──
-                    # B_sat layout: col A = "w1"/"w701"…; numbers go right across each row.
-                    _col0_ui = [str(df_b_raw.iloc[r, 0]).strip()
-                                for r in range(df_b_raw.shape[0])]
-                    _w_row_pairs_ui = [(r, _col0_ui[r]) for r in range(len(_col0_ui))
-                                       if _col0_ui[r].lower().startswith("w")]
-                    if _w_row_pairs_ui:
-                        _b_rows = []
-                        for _rr, _wlabel in _w_row_pairs_ui:
-                            _nums = _nums_from_series(df_b_raw.iloc[_rr, 1:])
-                            if _nums:
-                                _brow = {"w": _wlabel}
-                                _brow.update({f"pos_{i+1}": n
-                                              for i, n in enumerate(_nums)})
-                                _b_rows.append(_brow)
-                        if _b_rows:
-                            df_b = pd.DataFrame(_b_rows)
+                    # ── Strategy 1: row 0 contains "w"-prefixed headers ────────
+                    w_cols_b = [str(df_b_raw.iloc[0, c]).strip()
+                                for c in range(df_b_raw.shape[1])
+                                if str(df_b_raw.iloc[0, c]).strip().lower().startswith("w")]
+                    if w_cols_b:
+                        for i, wc in enumerate(w_cols_b):
+                            nums = _nums_from_series(df_b_raw.iloc[1:, i])
+                            if nums:
+                                b_data[wc] = pd.Series(nums)
 
-                    # ── Strategy 1: row 0 has w-prefixed column headers ────────────
-                    if df_b.empty:
-                        b_data = {}
-                        w_col_pairs_s1 = [
-                            (c, str(df_b_raw.iloc[0, c]).strip())
-                            for c in range(df_b_raw.shape[1])
-                            if str(df_b_raw.iloc[0, c]).strip().lower().startswith("w")
-                        ]
-                        if w_col_pairs_s1:
-                            for actual_col, wc in w_col_pairs_s1:
-                                nums = _nums_from_series(df_b_raw.iloc[1:, actual_col])
-                                if nums:
-                                    b_data[wc] = pd.Series(nums)
-                        if b_data:
-                            df_b = pd.DataFrame(b_data)
-
-                    # ── Strategy 2: parsed with header=0, columns named w* ────────
-                    if df_b.empty:
-                        b_data2 = {}
+                    # ── Strategy 2: parsed with header=0, columns named w* ────
+                    if not b_data:
                         df_b_hdr = xl_b.parse(sheet)
                         w_hdr_cols = [c for c in df_b_hdr.columns
                                       if str(c).strip().lower().startswith("w")]
                         for wc in w_hdr_cols:
                             nums = _nums_from_series(df_b_hdr[wc])
                             if nums:
-                                b_data2[str(wc).strip()] = pd.Series(nums)
-                        if b_data2:
-                            df_b = pd.DataFrame(b_data2)
+                                b_data[str(wc).strip()] = pd.Series(nums)
 
-                    if not df_b.empty:
-                        gs_set("B", df_b)
-                        n_sets = len(df_b) if "w" in df_b.columns else len(df_b.columns)
+                    # ── Strategy 3: auto-detect — every numeric column = a w-set
+                    if not b_data:
+                        w_idx = 1
+                        for ci in range(df_b_raw.shape[1]):
+                            nums = _nums_from_series(df_b_raw.iloc[:, ci])
+                            if nums:
+                                b_data[f"w{w_idx}"] = pd.Series(nums)
+                                w_idx += 1
+                        if b_data:
+                            st.info(
+                                f"ℹ️ Sheet '{sheet}' had no 'w'-prefixed headers — "
+                                f"auto-named {len(b_data)} numeric column(s) as "
+                                f"w1 … w{len(b_data)}. "
+                                f"Rename your sheet's header row to w1, w2, … to "
+                                f"control the labels.")
+                    if b_data:
+                        df_b = pd.DataFrame(b_data)
+                        S["B"] = df_b
                         st.markdown(
-                            f'<div class="ok">✅ B loaded: {n_sets} w-sets '
+                            f'<div class="ok">✅ B loaded: {len(b_data)} w-columns '
                             f'from sheet <b>{sheet}</b> in {b_rules_path.name}</div>',
                             unsafe_allow_html=True)
+                        # Show w-column lengths
+                        len_info = {wc: len(b_data[wc].dropna()) for wc in b_data}
+                        st.write("Column lengths:", len_info)
 
-                        # B is shown as-is (rows as uploaded — no transpose, no reordering)
-                        show_paginated_df(df_b, key="b_cols_view", use_container_width=True)
-                        st.download_button("⬇ Download B.csv",
-                                           to_csv_bytes(df_b), "B.csv",
-                                           "text/csv", key="dl_b_rules")
+                        # ── View toggle: columns (as stored) vs rows ──────────
+                        _b_view = st.radio(
+                            "Display B as:",
+                            ["Columns (as stored — each w is a column)",
+                             "Rows (after transpose — each w becomes a row)"],
+                            horizontal=True,
+                            key="b_view_mode"
+                        )
+                        if _b_view.startswith("Rows"):
+                            # Transpose so each w-column becomes a row with w label on left
+                            df_b_T = df_b.T.reset_index()
+                            df_b_T.columns = ["w"] + [f"pos_{i+1}"
+                                                       for i in range(df_b_T.shape[1]-1)]
+                            # Sort longest → shortest
+                            _pos_cols_b = [c for c in df_b_T.columns if c.startswith("pos_")]
+                            df_b_T["_len"] = df_b_T[_pos_cols_b].notna().sum(axis=1)
+                            df_b_T = df_b_T.sort_values("_len", ascending=False).drop(columns=["_len"]).reset_index(drop=True)
+                            # Add new_w as first column (renumbering after sort)
+                            df_b_T.insert(0, "new_w", [f"w{i+1}" for i in range(len(df_b_T))])
+                            st.markdown(
+                                '<div class="info">ℹ️ B transposed — each row is one '
+                                'w-set. <b>new_w</b> = renumbered after longest→shortest sort. '
+                                '<b>w</b> = original name. Numbers run across to the right.</div>',
+                                unsafe_allow_html=True)
+                            show_paginated_df(df_b_T, key="b_transposed_view", use_container_width=True)
+                            st.download_button("⬇ Download B_as_rows.csv",
+                                               to_csv_bytes(df_b_T), "B_as_rows.csv",
+                                               "text/csv", key="dl_b_rows")
+                        else:
+                            show_paginated_df(df_b, key="b_cols_view", use_container_width=True)
+                            st.download_button("⬇ Download B.csv",
+                                               to_csv_bytes(df_b), "B.csv",
+                                               "text/csv", key="dl_b_rules")
+
+                        # ── Renumbering table (always shown below) ────────────
+                        st.markdown("---")
+                        st.markdown("**🔢 B Renumbering — original → new position (longest → shortest)**")
+                        _b_renum = []
+                        _b_wcols_sorted = sorted(b_data.keys(),
+                                                  key=lambda k: len(b_data[k].dropna()),
+                                                  reverse=True)
+                        for _bi, _bwc in enumerate(_b_wcols_sorted):
+                            _b_renum.append({
+                                "new_w": f"w{_bi+1}",
+                                "old_w": _bwc,
+                                "numbers": int(len(b_data[_bwc].dropna())),
+                            })
+                        show_paginated_df(pd.DataFrame(_b_renum), key="b_renum_tbl", use_container_width=True)
                     else:
                         st.warning(f"Sheet '{sheet}' found but no numeric w-columns parsed.")
                 else:
@@ -5372,30 +4456,25 @@ elif page == "🧩 Variable Inputs":
                         _sheet_up = xl_up.sheet_names[0]
                     if _sheet_up:
                         _df_b_up = xl_up.parse(_sheet_up, header=None)
-                        # FIX: capture the actual column index alongside the header
-                        # name so we read data from the CORRECT column even when
-                        # non-w columns precede the w-headers (e.g. a row-label col).
-                        _w_col_pairs_up = [
-                            (c, str(_df_b_up.iloc[0, c]))
-                            for c in range(_df_b_up.shape[1])
-                            if str(_df_b_up.iloc[0, c]).startswith("w")
-                        ]
+                        _w_cols_up = [str(_df_b_up.iloc[0, c])
+                                      for c in range(_df_b_up.shape[1])
+                                      if str(_df_b_up.iloc[0, c]).startswith("w")]
                         _b_data_up = {}
-                        for _actual_col, _wc in _w_col_pairs_up:
-                            _col_vals = _df_b_up.iloc[1:, _actual_col].dropna()
+                        for _i, _wc in enumerate(_w_cols_up):
+                            _col_vals = _df_b_up.iloc[1:, _i].dropna()
                             _nums = [int(float(v)) for v in _col_vals
                                      if str(v).replace(".", "").replace("-", "").isdigit()
                                      and float(v) >= 1]
                             if _nums:
                                 _b_data_up[_wc] = pd.Series(_nums)
                         if _b_data_up:
-                            gs_set("B", pd.DataFrame(_b_data_up))
+                            S["B"] = pd.DataFrame(_b_data_up)
                             st.markdown(
                                 f'<div class="ok">✅ B loaded immediately: '
                                 f'{len(_b_data_up)} w-columns from sheet '
                                 f'<b>{_sheet_up}</b>.</div>',
                                 unsafe_allow_html=True)
-                            show_paginated_df(gs("B", pd.DataFrame()), key="b_uploaded_view", use_container_width=True)
+                            show_paginated_df(S["B"], key="b_uploaded_view", use_container_width=True)
                         else:
                             st.warning("File saved but no w-columns found. "
                                        "Check sheet layout — row 0 must have w1, w2, …")
@@ -5409,8 +4488,9 @@ elif page == "🧩 Variable Inputs":
     with vtabs[1]:
         st.markdown("**R — Rainbow (task2.py): Since Last → powerset combos**")
 
-        # ── load / auto-fetch Since Last (shared by both inner sub-tabs) ──
         sl_file = _gdirs["SinceLast"] / "since_last.json"
+        # Auto-fetch from lottolyzer if we don't have it cached yet.
+        # Use the overridden URL from the Since Last tab if the user changed it.
         _r_sl_url = (st.session_state.get("sl_url_override")
                      or _gcfg["lottolyzer"])
         if not sl_file.exists():
@@ -5423,601 +4503,213 @@ elif page == "🧩 Variable Inputs":
                     f'<div class="ok">✅ Auto-fetched Since Last — '
                     f'{len(sl_dict_auto)} numbers from lottolyzer.</div>',
                     unsafe_allow_html=True)
+        if sl_file.exists():
+            try:
+                sl_data = json.loads(sl_file.read_text())
+                since_last_dict = {int(k): int(v)
+                                   for k, v in sl_data.get("since_last_dict", {}).items()}
+                all_wt = sl_data.get("all_wt", [])
+                to_keep_list = sl_data.get("to_keep", [])
+                scraped_at = sl_data.get("scraped_at", "unknown")
 
-        # ── inner sub-tabs ─────────────────────────────────────────────────
-        _r_inner = st.tabs(["▶ Generate R", "🎨 Present Order"])
-
-        # ══ inner sub-tab 0 : Generate R ══════════════════════════════════
-        with _r_inner[0]:
-            if sl_file.exists():
-                try:
-                    sl_data = json.loads(sl_file.read_text())
-                    since_last_dict = {int(k): int(v)
-                                       for k, v in sl_data.get("since_last_dict", {}).items()}
-                    all_wt = sl_data.get("all_wt", [])
-                    to_keep_list = sl_data.get("to_keep", [])
-                    scraped_at = sl_data.get("scraped_at", "unknown")
-                    _r_ban_cls, _r_ban_msg = _data_freshness_banner(scraped_at, _gkey)
-                    st.markdown(
-                        f'<div class="{_r_ban_cls}">📅 {_r_ban_msg} '
-                        f'({len(since_last_dict)} numbers)</div>',
-                        unsafe_allow_html=True)
-
-                    st.write(f"**all_wt** (first 15 / most recent → oldest): "
-                             f"`{all_wt[:15]}...`")
-
-                    _n_groups = len(set(int(v) + 1 for v in since_last_dict.values()))
-                    manual_max = None
-                    if st.checkbox("Set max groups manually (else auto safe-max)",
-                                   key="r_manual"):
-                        manual_max = st.slider("Max Since Last groups to combine:",
-                                               1, max(2, _n_groups), min(3, _n_groups),
-                                               key="r_max_comb")
-                    if st.button("▶ Generate Rainbow (R)", key="gen_R",
-                                 type="primary", use_container_width=True):
-                        try:
-                            # Build sl_df with to_keep set per-number (not by position).
-                            # Bug fix: pd.Series(all_wt) assigns by positional index,
-                            # corrupting the wt filter when dict order ≠ all_wt order.
-                            _all_wt_set = set(all_wt)
-                            sl_df = pd.DataFrame({
-                                "numbers":    list(since_last_dict.keys()),
-                                "Since Last": list(since_last_dict.values()),
-                                "to_keep":    [n if n in _all_wt_set else pd.NA
-                                               for n in since_last_dict.keys()],
-                            })
-                            r_df, r_wt, r_info = generate_rainbow(sl_df, max_comb=manual_max)
-                            gs_set("R", r_df)
-                            gs_set("_R_wt", r_wt)
-                            r_path = _gdirs["Rainbow"] / f"R_{_gkey}.csv"
-                            r_df.to_csv(r_path, index=False)
-                            _cap = " (auto-capped to stay safe)" if r_info["capped"] else ""
-                            st.markdown(
-                                f'<div class="ok">✅ R generated: {r_info["n_combos"]} combos '
-                                f'from {r_info["n_groups"]} groups · max_comb={r_info["max_comb"]}'
-                                f'{_cap} → {r_path.name}</div>', unsafe_allow_html=True)
-                            show_paginated_df(r_df, key="r_generated_view",
-                                             use_container_width=True)
-                        except Exception as ex:
-                            st.error(f"Rainbow error: {ex}")
-
-                except Exception as ex:
-                    st.error(f"Error loading Since Last: {ex}")
-            else:
                 st.markdown(
-                    '<div class="warn">⚠️ Couldn\'t auto-fetch Since Last from lottolyzer '
-                    '(page may be unreachable or its layout changed). Use the '
-                    '<b>Since Last</b> tab to fetch again or upload it manually.</div>',
+                    f'<div class="ok">✅ Since Last loaded — {len(since_last_dict)} numbers '
+                    f'| scraped: {scraped_at[:16]}</div>',
                     unsafe_allow_html=True)
 
-            if not gs("R", pd.DataFrame()).empty:
-                st.markdown("**Current R in memory:**")
-                show_paginated_df(gs("R", pd.DataFrame()), key="r_current_memory",
-                                  use_container_width=True, height=200)
+                st.write(f"**all_wt** (first 15 / most recent → oldest): "
+                         f"`{all_wt[:15]}...`")
 
-        # ══ inner sub-tab 1 : Present Order ═══════════════════════════════
-        with _r_inner[1]:
-            st.markdown("**Present Order — all numbers ranked by Since Last (most recent → oldest)**")
+                # AUTO: pick the highest SAFE max_comb (no malfunction). Tick the
+                # box to intervene with a manual value instead.
+                _n_groups = len(set(int(v) + 1 for v in since_last_dict.values()))
+                manual_max = None
+                if st.checkbox("Set max groups manually (else auto safe-max)",
+                               key="r_manual"):
+                    manual_max = st.slider("Max Since Last groups to combine:",
+                                           1, max(2, _n_groups), min(3, _n_groups),
+                                           key="r_max_comb")
+                if st.button("▶ Generate Rainbow (R)", key="gen_R",
+                             type="primary", use_container_width=True):
+                    try:
+                        sl_df = pd.DataFrame({
+                            "numbers": list(since_last_dict.keys()),
+                            "Since Last": list(since_last_dict.values()),
+                        })
+                        sl_df["to_keep"] = pd.Series(all_wt)
+                        r_df, r_wt, r_info = generate_rainbow(sl_df, max_comb=manual_max)
+                        S["R"] = r_df
+                        S["_R_wt"] = r_wt    # R's to_keep/wt -> Ep input2
+                        r_path = _gdirs["Rainbow"] / f"R_{_gkey}.csv"
+                        r_df.to_csv(r_path, index=False)
+                        _cap = " (auto-capped to stay safe)" if r_info["capped"] else ""
+                        st.markdown(
+                            f'<div class="ok">✅ R generated: {r_info["n_combos"]} combos '
+                            f'from {r_info["n_groups"]} groups · max_comb={r_info["max_comb"]}'
+                            f'{_cap} → {r_path.name}</div>', unsafe_allow_html=True)
+                        show_paginated_df(r_df, key="r_generated_view", use_container_width=True)
+                    except Exception as ex:
+                        st.error(f"Rainbow error: {ex}")
+
+            except Exception as ex:
+                st.error(f"Error loading Since Last: {ex}")
+        else:
             st.markdown(
-                '<div class="info">'
-                'Numbers are arranged in their <b>present order</b>: '
-                'sorted by how many draws ago they last appeared. '
-                'Colour bands match the Since Last brackets used by Rainbow. '
-                'Numbers with the same Since Last value share one row/band.<br>'
-                '<b>Legend:</b> '
-                '<span style="background:#FFD700;color:#000;padding:1px 6px;border-radius:3px">■ Last Draw (0)</span> '
-                '<span style="background:#FFFF55;color:#000;padding:1px 6px;border-radius:3px">■ Very Recent (1–3)</span> '
-                '<span style="background:#92D050;color:#000;padding:1px 6px;border-radius:3px">■ Recent (4–9)</span> '
-                '<span style="background:#00B0F0;color:#000;padding:1px 6px;border-radius:3px">■ Moderate (10–19)</span> '
-                '<span style="background:#CC44FF;color:#fff;padding:1px 6px;border-radius:3px">■ Old (20–29)</span> '
-                '<span style="background:#FF69B4;color:#fff;padding:1px 6px;border-radius:3px">■ Very Old (30+)</span>'
-                '</div>',
+                '<div class="warn">⚠️ Couldn\'t auto-fetch Since Last from lottolyzer '
+                '(page may be unreachable or its layout changed). Use the '
+                '<b>Since Last</b> tab to fetch again or upload it manually.</div>',
                 unsafe_allow_html=True)
 
-            if not sl_file.exists():
-                st.markdown(
-                    '<div class="warn">⚠️ No Since Last data yet. '
-                    'Go to the <b>Since Last</b> tab to fetch or upload it first.</div>',
-                    unsafe_allow_html=True)
-            else:
-                try:
-                    _po_data = json.loads(sl_file.read_text())
-                    _po_sl   = {int(k): int(v)
-                                for k, v in _po_data.get("since_last_dict", {}).items()}
-                    _po_wt   = _po_data.get("all_wt", [])
-                    _po_at   = _po_data.get("scraped_at", "")[:16]
-
-                    def _po_color(sl_val):
-                        if sl_val == 0:   return ("#FFD700", "#000")
-                        if sl_val <= 3:   return ("#FFFF55", "#000")
-                        if sl_val <= 9:   return ("#92D050", "#000")
-                        if sl_val <= 19:  return ("#00B0F0", "#000")
-                        if sl_val <= 29:  return ("#CC44FF", "#fff")
-                        return ("#FF69B4", "#fff")
-
-                    def _po_label(sl_val):
-                        if sl_val == 0:   return "Last Draw"
-                        if sl_val <= 3:   return "Very Recent"
-                        if sl_val <= 9:   return "Recent"
-                        if sl_val <= 19:  return "Moderate"
-                        if sl_val <= 29:  return "Old"
-                        return "Very Old"
-
-                    # ── View selector ──────────────────────────────────────
-                    _po_view = st.radio(
-                        "Display style:",
-                        ["Colour Grid (grouped by SL value)",
-                         "Flat ranked table",
-                         "Rainbow combo overlay"],
-                        horizontal=True, key="po_view_sel")
-
-                    st.caption(f"Since Last data scraped: {_po_at} · "
-                               f"{len(_po_sl)} numbers · game: {_gcfg['label']}")
-
-                    # ── VIEW A : Colour grid ───────────────────────────────
-                    if _po_view == "Colour Grid (grouped by SL value)":
-                        # Group numbers by their exact SL value, show as rows
-                        from collections import defaultdict as _dd
-                        _po_groups = _dd(list)
-                        for _pn in _po_wt:
-                            _psl = _po_sl.get(_pn, 0)
-                            _po_groups[_psl].append(_pn)
-
-                        _html_rows = []
-                        _html_rows.append(
-                            "<table style='border-collapse:collapse;font-size:.85rem;"
-                            "width:100%;margin-top:8px'>"
-                            "<thead><tr>"
-                            "<th style='padding:4px 8px;text-align:center;background:#333;color:#fff;"
-                            "width:90px'>Since<br>Last</th>"
-                            "<th style='padding:4px 8px;text-align:center;background:#333;color:#fff;"
-                            "width:100px'>Group</th>"
-                            "<th style='padding:4px 8px;background:#333;color:#fff'>Numbers "
-                            "(present order — most recent first)</th>"
-                            "</tr></thead><tbody>")
-
-                        for _psl_val in sorted(_po_groups.keys()):
-                            _nums_in_grp = _po_groups[_psl_val]
-                            _bg, _fg = _po_color(_psl_val)
-                            _grp_lbl = _po_label(_psl_val)
-                            _cells = "".join(
-                                f"<span style='display:inline-block;background:{_bg};"
-                                f"color:{_fg};border-radius:4px;padding:2px 7px;"
-                                f"margin:2px 3px;font-weight:600;min-width:28px;"
-                                f"text-align:center'>{_pn}</span>"
-                                for _pn in _nums_in_grp)
-                            _html_rows.append(
-                                f"<tr>"
-                                f"<td style='padding:4px 8px;text-align:center;"
-                                f"background:{_bg};color:{_fg};font-weight:700;"
-                                f"border:1px solid #555'>{_psl_val}</td>"
-                                f"<td style='padding:4px 8px;text-align:center;"
-                                f"background:{_bg};color:{_fg};"
-                                f"border:1px solid #555'>{_grp_lbl}</td>"
-                                f"<td style='padding:4px 8px;border:1px solid #555'>"
-                                f"{_cells}</td>"
-                                f"</tr>")
-                        _html_rows.append("</tbody></table>")
-                        st.markdown("".join(_html_rows), unsafe_allow_html=True)
-
-                    # ── VIEW B : Flat ranked table ─────────────────────────
-                    elif _po_view == "Flat ranked table":
-                        _po_rows = []
-                        for _rank, _pn in enumerate(_po_wt, 1):
-                            _psl = _po_sl.get(_pn, 0)
-                            _bg, _fg = _po_color(_psl)
-                            _po_rows.append({
-                                "Rank":       _rank,
-                                "Number":     _pn,
-                                "Since Last": _psl,
-                                "Group":      _po_label(_psl),
-                            })
-                        _po_flat = pd.DataFrame(_po_rows)
-                        # Colour the "Group" column using background gradient hack
-                        # (plain dataframe; actual coloring via HTML caption below)
-                        show_paginated_df(_po_flat, key="po_flat_tbl",
-                                          use_container_width=True)
-
-                        # Coloured summary strip
-                        _strip_parts = []
-                        for _rank, _pn in enumerate(_po_wt, 1):
-                            _psl = _po_sl.get(_pn, 0)
-                            _bg, _fg = _po_color(_psl)
-                            _strip_parts.append(
-                                f"<span style='display:inline-block;background:{_bg};"
-                                f"color:{_fg};border-radius:4px;padding:2px 7px;"
-                                f"margin:2px 2px;font-weight:600;min-width:28px;"
-                                f"text-align:center'>{_pn}</span>")
-                        st.markdown(
-                            "<div style='margin-top:10px'><b>Full present order (colour-coded):</b><br>"
-                            + "".join(_strip_parts) + "</div>",
-                            unsafe_allow_html=True)
-
-                    # ── VIEW C : Rainbow combo overlay ─────────────────────
-                    else:
-                        _r_mem = gs("R", pd.DataFrame())
-                        if _r_mem is None or _r_mem.empty:
-                            st.markdown(
-                                '<div class="warn">⚠️ R not generated yet. '
-                                'Go to <b>▶ Generate R</b> first, then come back here.</div>',
-                                unsafe_allow_html=True)
-                        else:
-                            st.markdown(
-                                '<div class="info">Each column below is one Rainbow combination. '
-                                'Numbers are shown in <b>present order</b> (most recent → oldest) '
-                                'and colour-coded by Since Last bracket. '
-                                'Red outline = number appears in this combo.</div>',
-                                unsafe_allow_html=True)
-
-                            # Collect all number sets per Rainbow combo column
-                            _r_wcols = [c for c in _r_mem.columns
-                                        if str(c).startswith("w")]
-                            _max_combos_disp = st.slider(
-                                "Number of Rainbow combos to display:",
-                                1, min(len(_r_mem), 50), min(len(_r_mem), 20),
-                                key="po_n_combos")
-                            _r_slice = _r_mem.head(_max_combos_disp)
-
-                            # Build HTML table: rows = present-order rank, cols = combo
-                            _combo_sets = []
-                            for _, _crow in _r_slice.iterrows():
-                                _cset = set()
-                                for _wc in _r_wcols:
-                                    _v = _crow.get(_wc)
-                                    try:
-                                        _v = int(_v)
-                                        if _v >= 1:
-                                            _cset.add(_v)
-                                    except Exception:
-                                        pass
-                                _combo_sets.append(_cset)
-
-                            _hdr = ("<table style='border-collapse:collapse;"
-                                    "font-size:.78rem;width:100%'><thead><tr>"
-                                    "<th style='background:#333;color:#fff;padding:3px 6px;"
-                                    "white-space:nowrap'>Rank</th>"
-                                    "<th style='background:#333;color:#fff;padding:3px 6px;"
-                                    "white-space:nowrap'>Num / SL</th>")
-                            for _ci in range(len(_combo_sets)):
-                                _hdr += (f"<th style='background:#444;color:#fff;"
-                                         f"padding:3px 4px;text-align:center'>"
-                                         f"C{_ci+1}</th>")
-                            _hdr += "</tr></thead><tbody>"
-
-                            _body_parts = [_hdr]
-                            for _rank, _pn in enumerate(_po_wt, 1):
-                                _psl = _po_sl.get(_pn, 0)
-                                _bg, _fg = _po_color(_psl)
-                                _row_html = (
-                                    f"<tr>"
-                                    f"<td style='padding:2px 5px;text-align:center;"
-                                    f"color:#aaa'>{_rank}</td>"
-                                    f"<td style='padding:2px 5px;background:{_bg};"
-                                    f"color:{_fg};font-weight:600;text-align:center;"
-                                    f"border-radius:3px'>{_pn}<br>"
-                                    f"<span style='font-size:.65rem;font-weight:400'>"
-                                    f"SL={_psl}</span></td>")
-                                for _cset in _combo_sets:
-                                    if _pn in _cset:
-                                        _row_html += (
-                                            f"<td style='text-align:center;background:{_bg};"
-                                            f"color:{_fg};font-weight:700;"
-                                            f"border:2px solid #f00;padding:1px 3px'>"
-                                            f"{_pn}</td>")
-                                    else:
-                                        _row_html += (
-                                            "<td style='text-align:center;"
-                                            "color:#555;padding:1px 3px'>·</td>")
-                                _row_html += "</tr>"
-                                _body_parts.append(_row_html)
-                            _body_parts.append("</tbody></table>")
-
-                            st.markdown("".join(_body_parts), unsafe_allow_html=True)
-
-                except Exception as _po_ex:
-                    st.error(f"Present Order error: {_po_ex}")
+        if not S.get("R", pd.DataFrame()).empty:
+            st.markdown("**Current R in memory:**")
+            show_paginated_df(S["R"], key="r_current_memory", use_container_width=True, height=200)
 
     # ── TAB: D (Direct) ────────────────────────────────────────────────────
     with vtabs[2]:
         st.markdown(f"**D — Syndicate data for {_gcfg['label']}**")
-
-        # ── Build GAME-SPECIFIC file lists (Q1 fix) ────────────────────────
-        # Per-state files for THIS game only  e.g. D_NSW_sat.csv, D_VIC_sat.csv…
-        _d_state_files = sorted(
-            p for p in _gdirs["Games_Breakdown"].glob("D_*.csv")
-            if not p.name.startswith("D_ALL_"))
-        # Pre-combined national file for this game (D_ALL_sat.csv)
-        _d_all_combined = sorted(_gdirs["Games_Breakdown"].glob(f"D_ALL_{_gkey}.csv"))
-        # Additional files already in Direct/
-        _d_direct_files = (sorted(_gdirs["Direct"].glob("D*.csv"))
-                           + sorted(_gdirs["Direct"].glob("D*.xlsx")))
-
-        # Extract state abbreviations from per-state file names for display
-        _state_abbrs = []
-        for _sf in _d_state_files:
-            _parts = _sf.stem.upper().split("_")   # D_NSW_SAT → ['D','NSW','SAT']
-            if len(_parts) >= 2:
-                _state_abbrs.append(_parts[1])      # 'NSW', 'VIC' …
-
-        # Selectbox list: pre-combined first (already merged), then per-state, then Direct
-        _d_select_files = _d_all_combined + _d_state_files + _d_direct_files
-        _seen_fp, _d_select_dedup = set(), []
-        for _f in _d_select_files:
-            if _f not in _seen_fp:
-                _seen_fp.add(_f); _d_select_dedup.append(_f)
-        _d_select_files = _d_select_dedup
-
-        # Session state keys for unfiltered D and active draw filter
-        _d_full_key = gkey("D_full")
-        _d_draw_key = gkey("active_draw")
-
         st.markdown(
-            f'<div class="info">'
-            f'<b>D scope — {_gcfg["label"]} only.</b> '
-            f'Per-state files: <code>'
-            + (", ".join(f"D_{s}_{_gkey}.csv" for s in _state_abbrs) if _state_abbrs
-               else f"none found yet in Games_Breakdown/")
-            + f'</code><br>'
-            f'<b>Load ALL</b> combines only the per-state files for {_gcfg["label"]} '
-            f'({len(_d_state_files)} file{"s" if len(_d_state_files)!=1 else ""}). '
-            f'Then use <b>Set Active Draw ▼</b> to lock one draw into memory before '
-            f'CVI Matrix and all downstream steps.</div>',
+            '<div class="info">Load one state file <b>or</b> click '
+            '<b>Load ALL D files</b> to combine every state at once — '
+            'syndicates sorted longest pick → shortest automatically.</div>',
             unsafe_allow_html=True)
 
-        if _d_select_files:
-            _d_labels = [f.name for f in _d_select_files]
+        # Gather all game-specific D files (national D_ALL first, then per-state)
+        d_files = (sorted(_gdirs["Games_Breakdown"].glob(f"D_ALL_{_gkey}.csv"))
+                   + sorted(p for p in _gdirs["Games_Breakdown"].glob("D_*.csv")
+                             if not p.name.startswith("D_ALL_"))
+                   + sorted(_gdirs["Main_Data"].glob("D_*.csv"))
+                   + sorted(_gdirs["Direct"].glob("D*.csv"))
+                   + sorted(_gdirs["Direct"].glob("D*.xlsx")))
+        # Deduplicate preserving order
+        _seen_fp, d_files_dedup = set(), []
+        for _f in d_files:
+            if _f not in _seen_fp:
+                _seen_fp.add(_f); d_files_dedup.append(_f)
+        d_files = d_files_dedup
+
+        if d_files:
+            _d_labels = [f.name for f in d_files]
             ch_d = st.selectbox("Select file to load (or use Load ALL below):",
                                 _d_labels, key="sel_d_file")
 
             c_load1, c_loadall = st.columns(2)
-
-            # ── Load single file ────────────────────────────────────────────
             with c_load1:
                 if st.button("▶ Load selected file", key="btn_d_load_one",
                              use_container_width=True):
-                    _fp = _d_select_files[_d_labels.index(ch_d)]
+                    _fp = d_files[_d_labels.index(ch_d)]
                     with st.spinner(f"Loading {_fp.name}…"):
-                        df_d_loaded = _load_file(_fp)
-                        if not df_d_loaded.empty:
-                            df_d_loaded = sort_d_longest_first(df_d_loaded)
-                    gs_set("D", df_d_loaded)
-                    st.session_state[_d_full_key] = df_d_loaded.copy()
-                    st.session_state.pop(_d_draw_key, None)  # clear any prior draw filter
-                    st.success(f"✅ Loaded {len(df_d_loaded):,} rows from {_fp.name} "
+                        df_d = _load_file(_fp)
+                        if not df_d.empty:
+                            df_d = sort_d_longest_first(df_d)
+                    S["D"] = df_d
+                    st.success(f"✅ Loaded {len(df_d):,} rows from {_fp.name} "
                                f"(sorted longest → shortest)")
                     _auto_wire_generators(_gdirs, _gkey)
 
-            # ── Load ALL per-state files for this game ──────────────────────
             with c_loadall:
-                _load_all_lbl = (
-                    f"📦 Load ALL {_gcfg['label']} state files "
-                    f"({len(_d_state_files)} file{'s' if len(_d_state_files)!=1 else ''}"
-                    + (f": {' + '.join(_state_abbrs)}" if _state_abbrs else "")
-                    + ")"
-                )
-                if _d_state_files:
-                    if st.button(_load_all_lbl, key="btn_d_load_all",
-                                 type="primary", use_container_width=True):
-                        _dfs_states = []
-                        _prog_d = st.progress(0,
-                            text=f"Loading {_gcfg['label']} state files…")
-                        for _fi, _fp in enumerate(_d_state_files):
-                            _prog_d.progress((_fi + 1) / len(_d_state_files),
-                                             text=f"Loading {_fp.name}…")
-                            try:
-                                _tmp = _load_file(_fp)
-                                if not _tmp.empty:
-                                    _dfs_states.append(_tmp)
-                            except Exception as _ex:
-                                st.warning(f"Skipped {_fp.name}: {_ex}")
-                        _prog_d.empty()
-                        if _dfs_states:
-                            _d_combined = pd.concat(_dfs_states, ignore_index=True)
-                            _d_combined = sort_d_longest_first(_d_combined)
-                            # De-duplicate by Syndicate_ID + Draw_Number
-                            _dedup_cols = [c for c in
-                                           ["Syndicate_ID", "Draw_Number", "Game"]
-                                           if c in _d_combined.columns]
-                            if _dedup_cols:
-                                _d_combined = _d_combined.drop_duplicates(
-                                    subset=_dedup_cols, keep="first")
-                            gs_set("D", _d_combined)
-                            st.session_state[_d_full_key] = _d_combined.copy()
-                            st.session_state.pop(_d_draw_key, None)  # clear prior draw filter
-                            st.success(
-                                f"✅ Combined {len(_dfs_states)} state file(s) for "
-                                f"{_gcfg['label']} "
-                                f"({' + '.join(_state_abbrs) if _state_abbrs else ''}) → "
-                                f"**{len(_d_combined):,} rows** · "
-                                f"{len(_d_combined.columns)} cols "
-                                f"(duplicates removed, sorted longest → shortest)")
-                            _auto_wire_generators(_gdirs, _gkey)
-                        else:
-                            st.error("No state D files could be loaded.")
-                else:
-                    st.warning(
-                        f"No per-state D files found for {_gcfg['label']} in "
-                        f"Games_Breakdown/. Run Promote All + Split by Game first, "
-                        f"then return here.")
-
-        # ── Active Draw Selector (Q2 fix) ───────────────────────────────────
-        _df_full = st.session_state.get(_d_full_key, gs("D", pd.DataFrame()))
-        if not _df_full.empty:
-            st.markdown("---")
-            st.markdown("#### 🎯 Active Draw — Lock one draw into memory")
-            st.markdown(
-                '<div class="info">'
-                'Selecting a draw and clicking <b>Set Active Draw</b> filters '
-                '<code>S["D"]</code> to <b>only that draw\'s syndicates</b>. '
-                'CVI Matrix, Container Formula, and all downstream steps will then '
-                'work exclusively on that draw\'s data. '
-                'Click <b>Restore all draws</b> to go back to the full dataset.'
-                '</div>',
-                unsafe_allow_html=True)
-
-            _dn_col = "Draw_Number" if "Draw_Number" in _df_full.columns else None
-            _dd_col = "Draw_Date"   if "Draw_Date"   in _df_full.columns else None
-            _cur_active_draw = st.session_state.get(_d_draw_key)
-
-            # Build draw options from Draw_Number column
-            if _dn_col:
-                try:
-                    _draw_num_vals = (
-                        _df_full[_dn_col]
-                        .dropna()
-                        .astype(str)
-                        .str.extract(r'(\d+)')[0]
-                        .dropna()
-                        .astype(int)
-                        .sort_values()
-                        .unique()
-                        .tolist()
-                    )
-                except Exception:
-                    _draw_num_vals = []
-            else:
-                _draw_num_vals = []
-
-            _draw_opts = ["All draws"] + [str(d) for d in _draw_num_vals]
-            _def_draw_idx = 0
-            if _cur_active_draw and str(_cur_active_draw) in _draw_opts:
-                _def_draw_idx = _draw_opts.index(str(_cur_active_draw))
-
-            _adc1, _adc2, _adc3 = st.columns([2, 1, 2])
-            with _adc1:
-                _draw_sel = st.selectbox(
-                    f"Draw # for {_gcfg['label']}:",
-                    _draw_opts,
-                    index=_def_draw_idx,
-                    key=f"d_draw_sel_{_gkey}")
-            with _adc2:
-                st.write(""); st.write("")
-                if st.button("🎯 Set Active Draw",
-                             key=f"btn_set_draw_{_gkey}",
-                             type="primary",
-                             use_container_width=True):
-                    if _draw_sel == "All draws":
-                        gs_set("D", st.session_state[_d_full_key].copy())
-                        st.session_state.pop(_d_draw_key, None)
-                        st.success(
-                            f"✅ Restored all draws — "
-                            f"{len(gs('D', pd.DataFrame())):,} rows in memory.")
+                if st.button(
+                    f"📦 Load ALL D files ({len(d_files)} files, all states combined)",
+                    key="btn_d_load_all", type="primary", use_container_width=True,
+                ):
+                    dfs_all = []
+                    _prog_d = st.progress(0, text="Loading D files…")
+                    for _fi, _fp in enumerate(d_files):
+                        _prog_d.progress((_fi + 1) / len(d_files),
+                                         text=f"Loading {_fp.name}…")
+                        try:
+                            _tmp = _load_file(_fp)
+                            if not _tmp.empty:
+                                dfs_all.append(_tmp)
+                        except Exception as _ex:
+                            st.warning(f"Skipped {_fp.name}: {_ex}")
+                    _prog_d.empty()
+                    if dfs_all:
+                        df_d_all = pd.concat(dfs_all, ignore_index=True)
+                        df_d_all = sort_d_longest_first(df_d_all)
+                        S["D"] = df_d_all
+                        st.success(f"✅ Combined {len(dfs_all)} file(s) → "
+                                   f"**{len(df_d_all):,} rows** · {len(df_d_all.columns)} cols "
+                                   f"(sorted longest → shortest)")
+                        _auto_wire_generators(_gdirs, _gkey)
                     else:
-                        st.session_state[_d_draw_key] = int(_draw_sel)
-                        if _dn_col:
-                            try:
-                                _dn_s = (_df_full[_dn_col]
-                                         .astype(str)
-                                         .str.extract(r'(\d+)')[0]
-                                         .fillna("-1")
-                                         .astype(int))
-                                _filt = _df_full[_dn_s == int(_draw_sel)].copy()
-                            except Exception:
-                                _filt = _df_full.copy()
-                        elif _dd_col:
-                            # fallback: filter by Draw_Date
-                            try:
-                                _dds = pd.to_datetime(_df_full[_dd_col], errors="coerce")
-                                _uniq_dt = sorted(_dds.dropna().unique())
-                                _di = min(int(_draw_sel), len(_uniq_dt)) - 1
-                                _tgt = _uniq_dt[max(0, _di)]
-                                _filt = _df_full[
-                                    _dds.dt.normalize() ==
-                                    pd.Timestamp(_tgt).normalize()
-                                ].copy()
-                            except Exception:
-                                _filt = _df_full.copy()
-                        else:
-                            _filt = _df_full.copy()
-                        gs_set("D", _filt)
-                        st.success(
-                            f"✅ Active draw set to **Draw {_draw_sel}** → "
-                            f"**{len(_filt):,} rows** now in memory. "
-                            f"CVI Matrix and all downstream steps use this draw only.")
-                    st.rerun()
+                        st.error("No D files could be loaded.")
 
-            # ── Active draw status banner ───────────────────────────────────
-            with _adc3:
-                if _cur_active_draw:
-                    _filt_n = len(gs("D", pd.DataFrame()))
-                    st.success(
-                        f"🎯 **Active: Draw {_cur_active_draw}** "
-                        f"({_filt_n:,} rows in memory)")
+            # ── Display whatever is now in S["D"] ─────────────────────────
+            df_d = S.get("D", pd.DataFrame())
+            if not df_d.empty:
+                # ── Current draw vs future draws ───────────────────────────
+                if "Draw_Date" in df_d.columns:
+                    st.markdown("---")
+                    try:
+                        _dd_all = pd.to_datetime(df_d["Draw_Date"], errors="coerce")
+                        _future_dates_sorted = sorted(_dd_all.dropna().unique())
+                        if _future_dates_sorted:
+                            _current_draw_dt = _future_dates_sorted[0]
+                            _n_cur = int((_dd_all == _current_draw_dt).sum())
+                            _n_fut = int((_dd_all > _current_draw_dt).sum())
+                            _dm1, _dm2 = st.columns(2)
+                            _dm1.metric(
+                                "📅 Current draw syndicates", f"{_n_cur:,}",
+                                help=f"Draw date: {str(_current_draw_dt.date())}")
+                            _dm2.metric(
+                                "🔮 Future draw syndicates", f"{_n_fut:,}",
+                                help=f"{len(_future_dates_sorted)-1} future date(s) beyond current draw")
+
+                            _date_opts = (["All draws"]
+                                          + [str(d.date()) for d in _future_dates_sorted[:12]])
+                            _draw_filter = st.radio(
+                                "🗓️ Filter view by draw date:",
+                                _date_opts,
+                                horizontal=True,
+                                key="d_draw_filter"
+                            )
+                            if _draw_filter != "All draws":
+                                _sel_dt = pd.Timestamp(_draw_filter)
+                                _mask = _dd_all.dt.normalize() == _sel_dt.normalize()
+                                df_d = df_d[_mask]
+                                st.info(f"Showing {len(df_d):,} rows for draw {_draw_filter}")
+                    except Exception:
+                        pass
+
+                # ── Display in Excel-style row orientation ─────────────────
+                # w column on the left (w1, w2, w3… = one per syndicate row)
+                # Numbers run across: column headers 1, 2, 3… (number positions)
+                # Sorted longest pick → shortest, then re-numbered w1, w2…
+                _d_wcols_tab = [c for c in df_d.columns if re.match(r'^w\d+$', str(c), re.I)]
+
+                # Detect orientation: column-oriented = syndicates AS columns (few rows)
+                _d_col_orient = (len(_d_wcols_tab) > 0 and
+                                 len(df_d) < len(_d_wcols_tab) and
+                                 len(_d_wcols_tab) > 20)
+
+                if _d_col_orient:
+                    # Each column is a syndicate — transpose so each row = one syndicate
+                    _d_norm = df_d[_d_wcols_tab].T.reset_index(drop=True)
                 else:
-                    _full_n = len(_df_full)
-                    st.info(f"📋 No draw filter — all {_full_n:,} rows loaded")
+                    # Each row is already a syndicate — use w-columns only
+                    _d_norm = df_d[_d_wcols_tab].reset_index(drop=True) if _d_wcols_tab else df_d.reset_index(drop=True)
 
-            # ── Per-draw breakdown metrics ──────────────────────────────────
-            if _dn_col and _draw_num_vals:
-                try:
-                    _dn_s2 = (_df_full[_dn_col]
-                              .astype(str)
-                              .str.extract(r'(\d+)')[0]
-                              .dropna()
-                              .astype(int))
-                    _draw_counts = _dn_s2.value_counts().sort_index()
-                    _mc = st.columns(min(len(_draw_counts), 6))
-                    for _ci, (_dv, _dc) in enumerate(_draw_counts.items()):
-                        _flag = "🎯 " if str(_dv) == str(_cur_active_draw) else ""
-                        _mc[_ci % len(_mc)].metric(
-                            f"{_flag}Draw {_dv}", f"{_dc:,}",
-                            help=f"{_dc:,} syndicates for draw {_dv}")
-                except Exception:
-                    pass
-            elif _dd_col:
-                try:
-                    _dda = pd.to_datetime(_df_full[_dd_col], errors="coerce")
-                    _udates = sorted(_dda.dropna().unique())
-                    if _udates:
-                        _mc = st.columns(min(len(_udates), 6))
-                        for _ci, _ud in enumerate(_udates):
-                            _cnt = int((_dda.dt.normalize() ==
-                                        pd.Timestamp(_ud).normalize()).sum())
-                            _mc[_ci % len(_mc)].metric(
-                                str(pd.Timestamp(_ud).date()), f"{_cnt:,}")
-                except Exception:
-                    pass
+                # Sort: longest pick (most non-null) first
+                _d_norm = _d_norm.apply(pd.to_numeric, errors="coerce")
+                _d_sort_key = _d_norm.notna().sum(axis=1)
+                _d_norm = _d_norm.loc[_d_sort_key.sort_values(ascending=False, kind="stable").index].reset_index(drop=True)
 
-        # ── Display current D (filtered or full) ────────────────────────────
-        df_d = gs("D", pd.DataFrame())
-        if not df_d.empty:
-            _d_wcols_tab = [c for c in df_d.columns
-                            if re.match(r'^w\d+$', str(c), re.I)]
-            _d_col_orient = (len(_d_wcols_tab) > 0 and
-                             len(df_d) < len(_d_wcols_tab) and
-                             len(_d_wcols_tab) > 20)
+                # Rename position columns 1, 2, 3…
+                _d_norm.columns = list(range(1, len(_d_norm.columns) + 1))
+                # Add w label column (renumbered after sort)
+                _d_norm.insert(0, "w", [f"w{i+1}" for i in range(len(_d_norm))])
 
-            if _d_col_orient:
-                _d_norm = df_d[_d_wcols_tab].T.reset_index(drop=True)
-            else:
-                _d_norm = (df_d[_d_wcols_tab].reset_index(drop=True)
-                           if _d_wcols_tab else df_d.reset_index(drop=True))
-
-            _d_norm = _d_norm.apply(pd.to_numeric, errors="coerce")
-            _d_sort_key = _d_norm.notna().sum(axis=1)
-            _d_norm = _d_norm.loc[
-                _d_sort_key.sort_values(ascending=False, kind="stable").index
-            ].reset_index(drop=True)
-            _d_norm.columns = list(range(1, len(_d_norm.columns) + 1))
-            _d_norm.insert(0, "w", [f"w{i+1}" for i in range(len(_d_norm))])
-
-            n_syn = len(_d_norm)
-            n_pos = len(_d_norm.columns) - 1
-            _draw_lbl = (f" · Draw {st.session_state.get(_d_draw_key)}"
-                         if st.session_state.get(_d_draw_key) else " · all draws")
-            st.write(f"**{n_syn:,} syndicates · up to {n_pos} number "
-                     f"positions{_draw_lbl}**")
-            show_paginated_df(_d_norm, key="d_tab_main_view",
-                              use_container_width=True)
-            st.download_button(
-                f"⬇ Download D (current view) as CSV — {n_syn:,} rows",
-                to_csv_bytes(_d_norm),
-                f"D_{_gkey}_export.csv",
-                "text/csv",
-                key="dl_d_tab"
-            )
-        elif _d_select_files:
-            st.info("Load a file above to preview syndicates.")
+                n_syn = len(_d_norm)
+                n_pos = len(_d_norm.columns) - 1  # exclude 'w' column
+                st.write(f"**{n_syn:,} syndicates · up to {n_pos} number positions**")
+                show_paginated_df(_d_norm, key="d_tab_main_view", use_container_width=True)
+                st.download_button(
+                    f"⬇ Download D (current view) as CSV — {n_syn:,} rows",
+                    to_csv_bytes(_d_norm),
+                    f"D_{_gkey}_export.csv",
+                    "text/csv",
+                    key="dl_d_tab"
+                )
         else:
             st.info(f"No D files in Games/{_gkey.upper()}/. Run the Scraper page "
                     f"→ Promote All + Split by Game.")
@@ -6032,8 +4724,8 @@ elif page == "🧩 Variable Inputs":
             "wt list from R; falls back to unique numbers in D's top-8 rows if R not loaded. "
             "Auto-runs when D loads — use button to re-run manually.")
 
-        d_df = gs("D", pd.DataFrame())
-        r_df = gs("R", pd.DataFrame())
+        d_df = S.get("D", pd.DataFrame())
+        r_df = S.get("R", pd.DataFrame())
 
         if d_df.empty:
             st.warning("Load D first (Direct tab).")
@@ -6056,9 +4748,9 @@ elif page == "🧩 Variable Inputs":
                 try:
                     _ep_objs = prepare_ep_objects(d_df, mode="pairs")
                     _ep_df   = generate_excelpro(_ep_objs, wt_list_ep)
-                    gs_set("Ep", _ep_df)
+                    S["Ep"]  = _ep_df
                     _ep_path = _gdirs["ExcelPro"] / f"Ep_{_gkey}.csv"
-                    _sets_df_to_rows(_ep_df, set_col="set").to_csv(_ep_path, index=False)
+                    _ep_df.to_csv(_ep_path, index=False)
                     st.markdown(
                         f'<div class="ok">✅ Ep: {_ep_df.shape[1]} cols → '
                         f'{_ep_path.name}</div>',
@@ -6066,7 +4758,7 @@ elif page == "🧩 Variable Inputs":
                 except Exception as _ep_ex:
                     st.error(f"Ep error: {_ep_ex}")
 
-        ep_df_view = gs("Ep", pd.DataFrame())
+        ep_df_view = S.get("Ep", pd.DataFrame())
         if not ep_df_view.empty:
             st.markdown("**Ep output — row-oriented (one row per set):**")
             show_paginated_df(_sets_df_to_rows(ep_df_view, set_col="set"), key="ep_rows_view", use_container_width=True)
@@ -6100,7 +4792,7 @@ elif page == "🧩 Variable Inputs":
     with vtabs[4]:
         st.markdown("**Sp — Splits (task1b.py): top 4 w-columns of D + 4 split points**")
 
-        d_df = gs("D", pd.DataFrame())
+        d_df = S.get("D", pd.DataFrame())
         if d_df.empty:
             st.warning("Load D variable first (Direct tab).")
         else:
@@ -6192,9 +4884,9 @@ elif page == "🧩 Variable Inputs":
                             {k: pd.Series(list(v)) for k, v in result_sp.items()})
                         order_sp = sp_df.isna().sum().sort_values().index
                         sp_df = sp_df[order_sp]
-                        gs_set("Sp", sp_df)
+                        S["Sp"] = sp_df
                         sp_path = _gdirs["Splits"] / f"Sp_{_gkey}.csv"
-                        _sets_df_to_rows(sp_df, set_col="set").to_csv(sp_path, index=False)
+                        sp_df.to_csv(sp_path, index=False)
                         st.markdown(
                             f'<div class="ok">✅ Sp generated: {sp_df.shape[1]} columns '
                             f'→ {sp_path.name}</div>',
@@ -6205,7 +4897,7 @@ elif page == "🧩 Variable Inputs":
             else:
                 st.warning("Could not extract numeric data from D columns.")
 
-        sp_view = gs("Sp", pd.DataFrame())
+        sp_view = S.get("Sp", pd.DataFrame())
         if not sp_view.empty:
             st.markdown("**Current Sp in memory (row-oriented — one row per set):**")
             show_paginated_df(_sets_df_to_rows(sp_view, set_col="set"), key="sp_current_memory", use_container_width=True)
@@ -6249,7 +4941,7 @@ elif page == "🧩 Variable Inputs":
     with vtabs[5]:
         st.markdown("**So — SplitsCombi (automation_vba.py): top 4 w-columns → union combis**")
 
-        d_df = gs("D", pd.DataFrame())
+        d_df = S.get("D", pd.DataFrame())
         if d_df.empty:
             st.warning("Load D variable first (Direct tab).")
         else:
@@ -6349,9 +5041,9 @@ elif page == "🧩 Variable Inputs":
                             {k: pd.Series(list(v)) for k, v in result_so.items()})
                         order_so = so_df.isna().sum().sort_values().index
                         so_df = so_df[order_so]
-                        gs_set("So", so_df)
+                        S["So"] = so_df
                         so_path = _gdirs["Splits_Combi"] / f"So_{_gkey}.csv"
-                        _sets_df_to_rows(so_df, set_col="set").to_csv(so_path, index=False)
+                        so_df.to_csv(so_path, index=False)
                         st.markdown(
                             f'<div class="ok">✅ So generated: {so_df.shape[1]} columns '
                             f'→ {so_path.name}</div>',
@@ -6364,7 +5056,7 @@ elif page == "🧩 Variable Inputs":
             else:
                 st.warning("Could not extract numeric data from D columns.")
 
-        so_view = gs("So", pd.DataFrame())
+        so_view = S.get("So", pd.DataFrame())
         if not so_view.empty:
             st.markdown("**Current So in memory (row-oriented — one row per set):**")
             show_paginated_df(_sets_df_to_rows(so_view, set_col="set"), key="so_current_memory", use_container_width=True)
@@ -6421,20 +5113,12 @@ elif page == "🧩 Variable Inputs":
     # ── TAB: Since Last ────────────────────────────────────────────────────
     with vtabs[6]:
         st.markdown(f"**Since Last — fetch from lottolyzer for {_gcfg['label']}**")
-
-        # ── Draw schedule header ─────────────────────────────────────────────
-        _sl_last_draw = _last_draw_date(_gkey)
-        if _sl_last_draw:
-            from datetime import timedelta as _td
-            _sl_next_draw = _sl_last_draw + _td(days=7)
-            st.markdown(
-                f'<div class="info">📅 <b>Draw schedule</b> — '
-                f'last draw: <b>{_sl_last_draw.strftime("%-d %b %Y (%A)")}</b> · '
-                f'next draw: <b>{_sl_next_draw.strftime("%-d %b %Y (%A)")}</b> · '
-                f'day of week: <b>{_gcfg.get("draw_day","?")}</b></div>',
-                unsafe_allow_html=True)
-
         _default_sl_url = _gcfg["lottolyzer"]
+        st.markdown(
+            '<div class="note">⚠️ If the link below opens the wrong game on lottolyzer '
+            '(e.g. shows Set for Life instead of Saturday Lotto), paste the correct URL '
+            'in the field below and click <b>Fetch now</b>.</div>',
+            unsafe_allow_html=True)
         sl_url = st.text_input(
             "Lottolyzer URL (editable — fix if it points to the wrong game):",
             value=_default_sl_url,
@@ -6444,36 +5128,10 @@ elif page == "🧩 Variable Inputs":
 
         sl_file = _gdirs["SinceLast"] / "since_last.json"
 
-        _sl_btn_col1, _sl_btn_col2 = st.columns([3, 1])
-        with _sl_btn_col1:
-            _do_fetch_sl = st.button("⤓ Fetch now from lottolyzer", type="primary",
-                                     use_container_width=True, key="fetch_sl_now")
-        with _sl_btn_col2:
-            _do_clear_sl = st.button("🗑️ Clear cache", use_container_width=True,
-                                     key="clear_sl_cache",
-                                     help="Delete the cached since_last.json so the next fetch gets fresh data")
-        if _do_clear_sl and sl_file.exists():
-            sl_file.unlink()
-            st.success("Cache cleared. Click 'Fetch now' to get current data from lottolyzer.")
-            st.rerun()
-
-        if _do_fetch_sl:
-            _stats_freq = gs("Freq")
-            _has_freq_cache = (
-                _stats_freq is not None
-                and not _stats_freq.empty
-                and "number" in _stats_freq.columns
-                and "since_last" in _stats_freq.columns
-            )
-            if _has_freq_cache:
-                _sl_extract = _stats_freq[["number", "since_last"]].copy()
-                _sl_extract["number"]     = pd.to_numeric(_sl_extract["number"],     errors="coerce")
-                _sl_extract["since_last"] = pd.to_numeric(_sl_extract["since_last"], errors="coerce")
-                _sl_extract = _sl_extract.dropna(subset=["number", "since_last"])
-                d = {int(r["number"]): int(r["since_last"]) for _, r in _sl_extract.iterrows()}
-            else:
-                with st.spinner("Fetching from lottolyzer…"):
-                    d = fetch_since_last(sl_url, _gcfg["pool"])
+        if st.button("⤓ Fetch now from lottolyzer", type="primary",
+                     use_container_width=True, key="fetch_sl_now"):
+            with st.spinner("Fetching from lottolyzer…"):
+                d = fetch_since_last(sl_url, _gcfg["pool"])
             if d:
                 save_since_last(d, _gkey, _gcfg["label"], _gcfg["pool"],
                                 sl_url, sl_file)
@@ -6484,12 +5142,11 @@ elif page == "🧩 Variable Inputs":
         if sl_file.exists():
             try:
                 sl_data = json.loads(sl_file.read_text())
-                scraped_at = sl_data.get("scraped_at", "unknown")
+                scraped_at = sl_data.get("scraped_at", "unknown")[:16]
                 n_nums = len(sl_data.get("since_last_dict", {}))
-                _sl_ban_cls, _sl_ban_msg = _data_freshness_banner(scraped_at, _gkey)
                 st.markdown(
-                    f'<div class="{_sl_ban_cls}">📅 {_sl_ban_msg} '
-                    f'({n_nums} numbers cached)</div>',
+                    f'<div class="ok">✅ Since Last cached — {n_nums} numbers '
+                    f'| scraped: {scraped_at}</div>',
                     unsafe_allow_html=True)
                 # Show table
                 sl_dict = {int(k): int(v)
@@ -6565,220 +5222,6 @@ elif page == "🧩 Variable Inputs":
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE: CONTAINER FORMULA
 # ═══════════════════════════════════════════════════════════════════════════════
-    # ── TAB: Stats (Statistics Pipeline) ────────────────────────────────────────
-    with vtabs[7]:
-        st.markdown(f"**📊 Statistics Pipeline — {_gcfg['label']}**")
-
-        # ── Draw schedule header ─────────────────────────────────────────────
-        _stats_last_draw = _last_draw_date(_gkey)
-        if _stats_last_draw:
-            from datetime import timedelta as _td2
-            _stats_next_draw = _stats_last_draw + _td2(days=7)
-            st.markdown(
-                f'<div class="info">📅 <b>Draw schedule</b> — '
-                f'last draw: <b>{_stats_last_draw.strftime("%-d %b %Y (%A)")}</b> · '
-                f'next draw: <b>{_stats_next_draw.strftime("%-d %b %Y (%A)")}</b></div>',
-                unsafe_allow_html=True)
-
-        st.caption(
-            "Fetch number frequency table and draw history from lottolyzer. "
-            "Use *Since Last* from here to feed R. Also manually record new draws "
-            "to keep B up-to-date.")
-
-        _st_url    = _gcfg.get("lottolyzer","")
-        _st_pool   = _gcfg.get("pool", 45)
-        _st_freq_path  = _gdirs.get("SinceLast", _gdirs.get("Base", Path("."))) / "number_freq.csv"
-        _st_hist_path  = _gdirs.get("SinceLast", _gdirs.get("Base", Path("."))) / "draw_history.csv"
-
-        # ── Clear cached stats files ─────────────────────────────────────────
-        if st.button("🗑️ Clear cached frequency & history (force fresh fetch)",
-                     key="stats_clear_cache",
-                     help="Deletes number_freq.csv and draw_history.csv so the next fetch pulls current data"):
-            _cleared = []
-            for _p in [_st_freq_path, _st_hist_path]:
-                if _p.exists():
-                    _p.unlink()
-                    _cleared.append(_p.name)
-                    S.pop(f"Freq_{_gkey}", None)
-                    S.pop(f"DrawHist_{_gkey}", None)
-            if _cleared:
-                st.success(f"Cleared: {', '.join(_cleared)}. Now click Fetch below to get current {_gcfg['label']} data.")
-            else:
-                st.info("No cached files to clear.")
-            st.rerun()
-
-        # ── Section 1: Number Frequency Table ───────────────────────────────────
-        st.markdown("### Number Frequency Table")
-        _st_col1, _st_col2 = st.columns([3,1])
-        with _st_col1:
-            _st_freq_url = st.text_input("Frequency URL", value=_st_url,
-                                          key="stats_freq_url",
-                                          placeholder="https://en.lottolyzer.com/…")
-        with _st_col2:
-            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-            _do_fetch_freq = st.button("🔄 Fetch Frequencies", key="stats_fetch_freq",
-                                        use_container_width=True)
-
-        if _do_fetch_freq and _st_freq_url:
-            with st.spinner("Fetching number frequency table…"):
-                _freq_df = fetch_number_frequencies(_st_freq_url, _st_pool)
-            if _freq_df is not None and not _freq_df.empty:
-                # Sanity check: a valid frequency table should have at least half
-                # the pool size as rows, and since_last must not be all-None.
-                _sl_valid = pd.to_numeric(_freq_df.get("since_last", pd.Series()), errors="coerce").notna().sum()
-                _min_rows = max(5, _st_pool // 2)
-                if len(_freq_df) < _min_rows or _sl_valid == 0:
-                    st.error(
-                        f"❌ Fetch returned only {len(_freq_df)} rows with {_sl_valid} valid "
-                        f"'since_last' values — this doesn't look like a frequency table. "
-                        f"The URL must be in the format: "
-                        f"https://en.lottolyzer.com/number-frequencies/australia/[game-slug] "
-                        f"(e.g. tattslotto). Check the URL and try again. "
-                        f"Data NOT cached."
-                    )
-                else:
-                    _freq_df.to_csv(_st_freq_path, index=False)
-                    gs_set("Freq", _freq_df)
-                    st.success(f"✅ Fetched {len(_freq_df)} numbers — saved to {_st_freq_path.name}")
-            else:
-                st.error(
-                    "❌ Could not parse frequency table. "
-                    "URL must be: https://en.lottolyzer.com/number-frequencies/australia/tattslotto "
-                    "(for Saturday Lotto). Check URL and try again."
-                )
-
-        # Auto-load cached frequency table
-        if gs("Freq") is None or gs("Freq", pd.DataFrame()).empty:
-            if _st_freq_path.exists():
-                try:
-                    gs_set("Freq", pd.read_csv(_st_freq_path))
-                except Exception:
-                    pass
-
-        _freq_view = gs("Freq", pd.DataFrame())
-        if not _freq_view.empty:
-            # Show a human-readable "last fetched" and freshness banner
-            if _st_freq_path.exists():
-                import time as _time
-                _mtime = _st_freq_path.stat().st_mtime
-                _mtime_str = datetime.fromtimestamp(_mtime).strftime("%-d %b %Y %H:%M")
-                _fban_cls, _fban_msg = _data_freshness_banner(
-                    datetime.fromtimestamp(_mtime).isoformat(), _gkey)
-                st.markdown(
-                    f'<div class="{_fban_cls}">📅 {_fban_msg} '
-                    f'({len(_freq_view)} numbers)</div>',
-                    unsafe_allow_html=True)
-            else:
-                st.caption(f"{len(_freq_view)} numbers")
-            show_paginated_df(_freq_view, key="stats_freq_view", use_container_width=True)
-            st.download_button("⬇ Download frequency CSV",
-                               _freq_view.to_csv(index=False).encode(),
-                               f"freq_{_gkey}.csv", "text/csv", key="dl_stats_freq")
-            # Quick Since-Last digest — drop rows where number or since_last is NaN
-            if "since_last" in _freq_view.columns and "number" in _freq_view.columns:
-                _sl_clean = _freq_view[["number", "since_last"]].copy()
-                _sl_clean["number"]     = pd.to_numeric(_sl_clean["number"],     errors="coerce")
-                _sl_clean["since_last"] = pd.to_numeric(_sl_clean["since_last"], errors="coerce")
-                _sl_clean = _sl_clean.dropna(subset=["number", "since_last"])
-                _sl_clean["number"]     = _sl_clean["number"].astype(int)
-                _sl_clean["since_last"] = _sl_clean["since_last"].astype(int)
-                sl_from_freq = dict(zip(_sl_clean["number"], _sl_clean["since_last"]))
-                st.info(f"💡 Since Last extracted for {len(sl_from_freq)} numbers. "
-                        f"Use **Save to Since Last** below to make this available to R.")
-                if st.button("💾 Save frequency Since Last → R pipeline", key="stats_save_sl"):
-                    save_since_last(sl_from_freq, _gkey, _gcfg["label"],
-                                    _st_pool, _st_freq_url,
-                                    _gdirs["SinceLast"] / "since_last.json")
-                    st.success("✅ Since Last saved — reload the R tab to use it.")
-
-        st.markdown("---")
-
-        # ── Section 2: Draw History ──────────────────────────────────────────────
-        st.markdown("### Draw History")
-        _st_hist_pages = st.slider("Pages to fetch (50 draws/page)", 1, 10, 3,
-                                    key="stats_hist_pages")
-        _do_fetch_hist = st.button("🔄 Fetch Draw History", key="stats_fetch_hist",
-                                    use_container_width=False)
-
-        if _do_fetch_hist:
-            with st.spinner(f"Fetching {_st_hist_pages} page(s) of draw history…"):
-                _hist_df = fetch_draw_history(_gkey, pages=_st_hist_pages)
-            if _hist_df is not None and not _hist_df.empty:
-                _hist_df.to_csv(_st_hist_path, index=False)
-                gs_set("DrawHist", _hist_df)
-                st.success(f"✅ Fetched {len(_hist_df)} draws — saved to {_st_hist_path.name}")
-            else:
-                st.error("❌ Could not parse draw history. Check game config URL.")
-
-        if gs("DrawHist") is None or gs("DrawHist", pd.DataFrame()).empty:
-            if _st_hist_path.exists():
-                try:
-                    gs_set("DrawHist", pd.read_csv(_st_hist_path))
-                except Exception:
-                    pass
-
-        _hist_view = gs("DrawHist", pd.DataFrame())
-        if not _hist_view.empty:
-            # Show latest 10 draws inline
-            _disp_hist = _hist_view.head(10).copy()
-            st.caption(f"Latest {min(10, len(_hist_view))} of {len(_hist_view)} draws")
-            show_paginated_df(_disp_hist, key="stats_hist_view", use_container_width=True)
-            st.download_button("⬇ Download draw history CSV",
-                               _hist_view.to_csv(index=False).encode(),
-                               f"draw_history_{_gkey}.csv", "text/csv", key="dl_stats_hist")
-
-        st.markdown("---")
-
-        # ── Section 3: Manual Draw Entry (update B) ──────────────────────────────
-        st.markdown("### Add New Draw → B")
-        st.caption(
-            "Enter the winning numbers for a new draw. They will be appended to B "
-            "so the pipeline stays current. Numbers are sorted (w1=smallest) before saving.")
-
-        _draw_label_in = st.text_input("Draw label / number (optional)", value="",
-                                        key="stats_draw_label",
-                                        placeholder="e.g. 4687  or  2026-06-07")
-        _draw_nums_in  = st.text_input("Winning numbers (space or comma separated)",
-                                        value="", key="stats_draw_nums",
-                                        placeholder="e.g.  4 7 13 21 29 38")
-
-        _do_add_draw = st.button("➕ Add draw to B", key="stats_add_draw")
-        if _do_add_draw:
-            try:
-                _new_nums = [int(x) for x in re.split(r"[,\s]+", _draw_nums_in.strip()) if x]
-                if not _new_nums:
-                    st.warning("Enter at least one number.")
-                else:
-                    _b_current = gs("B", pd.DataFrame())
-                    _b_updated = append_draw_to_b(_b_current, _new_nums,
-                                                   draw_label=_draw_label_in.strip())
-                    gs_set("B", _b_updated)
-                    # Auto-save to disk
-                    _b_save_path = _gdirs["Base"] / f"B_{_gkey}_updated.csv"
-                    _b_updated.to_csv(_b_save_path, index=False)
-                    st.success(
-                        f"✅ Added draw {_draw_label_in or '(unlabelled)'}: "
-                        f"{sorted(_new_nums)} → B now has {len(_b_updated)} rows. "
-                        f"Saved to {_b_save_path.name}")
-                    st.caption("B in memory has been updated. Re-run generators to reflect the new draw.")
-            except Exception as _draw_ex:
-                st.error(f"Error adding draw: {_draw_ex}")
-
-        # Show current B tail for confirmation
-        _b_for_stats = gs("B", pd.DataFrame())
-        if not _b_for_stats.empty:
-            if "w" in _b_for_stats.columns:
-                # Row-oriented: each row is a w-set
-                _tail_b = _b_for_stats.tail(5)
-                st.caption(f"Last 5 w-sets of B ({len(_b_for_stats)} total w-sets):")
-            else:
-                # Legacy column-oriented
-                _wcols_b = [c for c in _b_for_stats.columns
-                             if str(c).lower().startswith("w")]
-                _tail_b = _b_for_stats[_wcols_b].tail(5)
-                st.caption(f"Last 5 rows of B ({len(_b_for_stats)} total rows, "
-                           f"{len(_wcols_b)} w-columns):")
-            show_paginated_df(_tail_b, key="stats_b_tail", use_container_width=True)
 elif page == "📦 Container Formula":
     st.markdown('<span class="sec-hdr hdr-purple">📦 Container Formula — Live Collation</span>',
                 unsafe_allow_html=True)
@@ -6797,7 +5240,7 @@ elif page == "📦 Container Formula":
     vc = st.columns(6)
     for i, k in enumerate(["B","R","D","Sp","So","Ep"]):
         with vc[i]:
-            df = gs(k, pd.DataFrame())
+            df = S.get(k, pd.DataFrame())
             if isinstance(df, pd.DataFrame) and not df.empty:
                 st.markdown(f'<div class="ok">✅ {k} {len(df)}r×{len(df.columns)}c</div>',
                             unsafe_allow_html=True)
@@ -6835,8 +5278,8 @@ elif page == "📦 Container Formula":
         b = re.sub(r"\d+$", "", str(c)).strip()
         if b and b not in _seen:
             _seen.add(b); base_needed.append(b)
-    missing = [b for b in base_needed if gs(b) is None or
-               (isinstance(gs(b), pd.DataFrame) and gs(b).empty)]
+    missing = [b for b in base_needed if b not in S or
+               (isinstance(S.get(b), pd.DataFrame) and S[b].empty)]
     if missing:
         st.markdown(f'<div class="warn">⚠️ Missing/empty: {missing} '
                     f'(load these in Variable Inputs, or Build W-Matrix for D)</div>',
@@ -6853,7 +5296,7 @@ elif page == "📦 Container Formula":
         _demo_pieces = []
         _demo_summary = []
         for _dv in base_needed:
-            _df_dv = gs(_dv)
+            _df_dv = S.get(_dv)
             if _df_dv is None or (isinstance(_df_dv, pd.DataFrame) and _df_dv.empty):
                 continue
             _block = _to_w_rows(_df_dv, is_direct=(_dv == "D"))
@@ -6901,7 +5344,7 @@ elif page == "📦 Container Formula":
         else:
             out = _gdirs["CVI"] / f"CVI_{chosen_f}.csv"
             result.to_csv(out, index=False)
-            st.session_state.setdefault(gkey("cvi"), {})[chosen_f] = result
+            S["cvi"][chosen_f] = result
             n_wcols = sum(1 for c in result.columns if str(c).startswith("w"))
             st.markdown(f'<div class="ok">✅ {chosen_f}: {len(result):,} rows '
                         f'(w-sets) × {n_wcols} number columns (w1…w{n_wcols}) '
@@ -6926,9 +5369,9 @@ elif page == "📦 Container Formula":
             st.download_button(f"⬇ CVI_{chosen_f}.csv", to_csv_bytes(result),
                                f"CVI_{chosen_f}.csv","text/csv")
 
-    if gs("cvi"):
+    if S["cvi"]:
         with st.expander("📋 All collated CVIs in memory"):
-            for fname, df in gs("cvi", {}).items():
+            for fname, df in S["cvi"].items():
                 st.markdown(f"**{fname}** — {len(df)} rows × {len(df.columns)} cols")
                 show_paginated_df(df, key=f"cvi_mem_expander_{fname}", use_container_width=True)
 
@@ -7041,17 +5484,7 @@ elif page == "🖥️ Container Dashboards":
         n_workers = min(len(worker_args), cpu_count())
         st.caption(f"Using {n_workers} CPU cores of {cpu_count()} available")
 
-        # On macOS Python 3.8+, the default multiprocessing start method is 'spawn'.
-        # Spawn re-imports this module in each worker, which triggers top-level
-        # st.set_page_config() and raises StreamlitAPIException — all workers fail
-        # silently (result["status"] stays "error").  Use 'fork' explicitly: the
-        # worker inherits the already-initialised interpreter state and never
-        # re-imports the module.  Forking a multithreaded process (Streamlit has
-        # background threads) is generally safe here because workers are CPU-bound
-        # and do not touch shared Streamlit state.
-        import multiprocessing as _mp_mod
-        _pool_ctx = _mp_mod.get_context("fork")
-        with _pool_ctx.Pool(processes=n_workers) as pool:
+        with Pool(processes=n_workers) as pool:
             results = []
             for i, res in enumerate(
                 pool.imap_unordered(_parallel_worker, worker_args)
@@ -7129,14 +5562,13 @@ elif page == "🖥️ Container Dashboards":
                 f'{db}…  Container Dashboard</div>', unsafe_allow_html=True)
 
     # ── Auto-load CVI for this formula ────────────────────────────────────
-    st.session_state.setdefault(gkey("cvi"), {})
-    cvi_df = gs("cvi", {}).get(formula_name)
+    cvi_df = S["cvi"].get(formula_name)
     if cvi_df is None:
         # Try all CVI files for this formula (any lotto type, any date)
         for cvi_fp in sorted(_gdirs["CVI"].glob(f"CVI_*{formula_name}*.csv")):
             cvi_df = _load_file(cvi_fp)
             if not cvi_df.empty:
-                st.session_state.setdefault(gkey("cvi"), {})[formula_name] = cvi_df
+                S["cvi"][formula_name] = cvi_df
                 break
         if cvi_df is None:
             for search_dir in [_gdirs["CVI"], _gdirs["Rainbow"]]:
@@ -7159,11 +5591,10 @@ elif page == "🖥️ Container Dashboards":
             if "w" in df_sc.columns and "Selected Count" in df_sc.columns:
                 for _, row in df_sc.iterrows():
                     sc_auto[str(row["w"])] = str(row["Selected Count"])
-        except Exception as _e:
-            logging.warning("SC auto-load: could not read %s: %s", sc_file, _e)
+        except Exception: pass
 
     # ── Auto-scan and load Main Data ──────────────────────────────────────
-    main_df = gs("main_data", pd.DataFrame())
+    main_df = S.get("main_data", pd.DataFrame())
     avail_main = scan_main_data_files()
 
     # ── Preview panel ──────────────────────────────────────────────────────
@@ -7215,7 +5646,7 @@ elif page == "🖥️ Container Dashboards":
             if w_check and not n_check:
                 st.error("⚠️ Loaded file looks like a CVI file (w-columns). "
                          "Please load correct Main Data below.")
-                gs_set("main_data", pd.DataFrame())
+                S["main_data"] = pd.DataFrame()
                 main_df = pd.DataFrame()
             else:
                 st.success(f"✅ **Main Data** — {len(main_df):,} rows × "
@@ -7231,8 +5662,8 @@ elif page == "🖥️ Container Dashboards":
                         chosen = next(
                             f for f in avail_main if f["raw"] == sel_main)
                         main_df = _load_file(Path(chosen["path"]))
-                        gs_set("main_data",      main_df)
-                        gs_set("main_data_path", chosen["path"])
+                        S["main_data"] = main_df
+                        S["main_data_path"] = chosen["path"]
                         st.success(f"Loaded {sel_main}")
                         st.rerun()
                 show_paginated_df(main_df, key="cd_main_df_preview", use_container_width=True, hide_index=True)
@@ -7248,8 +5679,8 @@ elif page == "🖥️ Container Dashboards":
                     chosen2 = next(
                         f for f in avail_main if f["raw"] == sel_main2)
                     main_df = _load_file(Path(chosen2["path"]))
-                    gs_set("main_data",      main_df)
-                    gs_set("main_data_path", chosen2["path"])
+                    S["main_data"] = main_df
+                    S["main_data_path"] = chosen2["path"]
                     st.rerun()
 
     st.markdown("---")
@@ -7266,7 +5697,7 @@ elif page == "🖥️ Container Dashboards":
             # Always show replace button even when loaded
             if st.button("🔄 Replace CVI", key=f"clr_cvi_{db}",
                          use_container_width=True):
-                gs("cvi", {}).pop(formula_name, None)
+                S["cvi"].pop(formula_name, None)
                 # Remove from disk so it won't auto-reload
                 cvi_path = _gdirs["CVI"] / f"CVI_{formula_name}.csv"
                 if cvi_path.exists():
@@ -7286,7 +5717,7 @@ elif page == "🖥️ Container Dashboards":
             df_cvi_up = _read_uploaded(up_cvi)
             cvi_save = _gdirs["CVI"] / f"CVI_{formula_name}.csv"
             df_cvi_up.to_csv(cvi_save, index=False)
-            st.session_state.setdefault(gkey("cvi"), {})[formula_name] = df_cvi_up
+            S["cvi"][formula_name] = df_cvi_up
             # Bump version so key resets next time Replace is clicked
             if "cvi_upload_v" not in S: S["cvi_upload_v"] = {}
             S["cvi_upload_v"][db] = S["cvi_upload_v"].get(db, 0) + 1
@@ -7301,8 +5732,8 @@ elif page == "🖥️ Container Dashboards":
                        f"{len(main_df.columns)} cols")
             if st.button("🔄 Replace Main Data", key=f"clr_md_{db}",
                          use_container_width=True):
-                gs_set("main_data",      pd.DataFrame())
-                gs_set("main_data_path", "")   # drop stale path so DuckDB can't misfire
+                S["main_data"] = pd.DataFrame()
+                S["main_data_path"] = ""   # drop stale path so DuckDB can't misfire
                 main_df = pd.DataFrame()
                 st.rerun()
         else:
@@ -7317,10 +5748,10 @@ elif page == "🖥️ Container Dashboards":
             df_md_up = _read_uploaded(up_md)
             for col in df_md_up.columns:
                 df_md_up[col] = pd.to_numeric(df_md_up[col], errors="coerce")
-            gs_set("main_data",      df_md_up)
+            S["main_data"] = df_md_up
             # Uploaded in-memory data has no stable on-disk source; clear the
             # path so the DuckDB pre-pass guard won't match it to another file.
-            gs_set("main_data_path", "")
+            S["main_data_path"] = ""
             if "md_upload_v" not in S: S["md_upload_v"] = {}
             S["md_upload_v"][db] = S["md_upload_v"].get(db, 0) + 1
             main_df = df_md_up
@@ -7527,12 +5958,12 @@ elif page == "🖥️ Container Dashboards":
             # it is safe — large CSV, DuckDB present, row-count == M, contiguous
             # n-columns — and falls back to pandas otherwise.
             res = run_matching(main_df, cvi_df, sc_dict, carry_fwd,
-                               main_path=gs("main_data_path"))
-        st.session_state.setdefault(gkey("results"), {})[db] = res
+                               main_path=S.get("main_data_path"))
+        S["results"][db] = res
 
     # ── Display results (persists after run) ──────────────────────────────
-    if db in gs("results", {}):
-        res   = gs("results", {})[db]
+    if db in S["results"]:
+        res   = S["results"][db]
         fig9  = res["fig9_table"]
         sel   = res["selected"]
         unsel = res["unselected"]
@@ -8104,7 +6535,7 @@ elif page == "📤 Master Outputs":
     # Collect from all dashboards
     all_sel, all_unsel, all_bd = [], [], []
     for db in DASHBOARDS:
-        res = gs("results", {}).get(db)
+        res = S["results"].get(db)
         if res:
             if not res["selected"].empty:
                 s = res["selected"].copy(); s.insert(0,"Dashboard",db)
@@ -8312,4 +6743,3 @@ elif page == "🗂️ Cluster Manager":
                 save_clusters(clusters)
                 st.success("Cluster deleted from registry.")
                 st.rerun()
-
