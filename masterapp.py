@@ -884,7 +884,7 @@ def _wt_writer(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def generate_rainbow(sl_df: pd.DataFrame, max_comb=None, combo_guard: int = 200_000):
+def generate_rainbow(sl_df: pd.DataFrame, max_comb=None, combo_guard: int = 5_000):
     """R from the Since-Last table. Returns (result_df, wt_df, info). Safe-max guard
     auto-lowers max_comb until the combo-count fits — no 2**K explosion."""
     df = _normalise_sl(sl_df)
@@ -1252,7 +1252,7 @@ def execute_collation(components: list[str]) -> pd.DataFrame:
 
     pieces = []
     for var in base_vars:
-        df = S.get(var) if S else None
+        df = gs(var)
         if df is None or (isinstance(df, pd.DataFrame) and df.empty):
             continue
         block = _to_w_rows(df, is_direct=(var == "D"))   # ROW-oriented w-sets
