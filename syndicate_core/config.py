@@ -1,3 +1,284 @@
+from pathlib import Path
+import shutil as _shutil
+
+__all__ = [
+    # path / dirs
+    "find_root", "ROOT", "DIRS",
+    # game config
+    "GAMES_CFG", "GAME_KEYS", "GAME_LABELS", "GAME_NAME_MAP",
+    # formula / dashboard config
+    "CF_ROWS", "DASHBOARDS", "COMP_MAP",
+    # lotto metadata
+    "LOTTO_TYPES",
+    # geography
+    "TARGET_STATES", "STATE_POSTCODES",
+    # processing tunables
+    "CHUNK_SIZE", "DISPLAY_THRESHOLD",
+]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PATH AUTO-DETECTION
+# ═══════════════════════════════════════════════════════════════════════════════
+def find_root() -> Path:
+    for base in [Path.home()/"Desktop", Path.home()/"Documents",
+                 Path.home(), Path.cwd()]:
+        p = base / "o_Automation_Suite"
+        if p.is_dir():
+            return p
+        if base.is_dir():
+            for sub in base.iterdir():
+                try:
+                    q = sub / "o_Automation_Suite"
+                    if q.is_dir():
+                        return q
+                except Exception:
+                    pass
+    # __file__ is syndicate_core/config.py — .parent.parent is the suite root
+    fb = Path(__file__).parent.parent
+    fb.mkdir(parents=True, exist_ok=True)
+    return fb
+
+ROOT = find_root()
+
+# ── Global-only DIRS (shared across all games) ───────────────────────────────
+# Game-specific paths (Main_Data, Formulas, Containers, Outputs, Variables, CVI,
+# Selected_Counts, Base, Splits, etc.) are accessed via game_dirs() / active_game_dirs()
+# so they are always scoped to the correct game and suffixed with _{game}.
+# Only truly shared paths live here.
+DIRS = {
+    "Global_Scraper": ROOT / "Global_Scraper",  # raw scrapes: D_<STATE>.csv (all games)
+    "debug_html":     ROOT / "debug_html",       # debug output
+}
+for _d in DIRS.values():
+    _d.mkdir(parents=True, exist_ok=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STARTUP MIGRATION — runs once per session to enforce the folder convention.
+#
+# Problem: old code created root-level folders (Containers, Formulas, Main_Data,
+# Variables, Outputs) and game subfolders without the _{game} suffix. Every time
+# the app started those folders were re-created by the old DIRS mkdir loop.
+#
+# Fix embedded here so no separate script is needed:
+#   1. Remove stale root-level duplicate folders (only if empty — no data lost).
+#   2. Rename game subfolders to the _{game} suffix convention.
+#   3. Flatten old Variables/ tree → variable_inputs_{game}/ and
+#      container_variable_inputs_{game}/.
+# ═══════════════════════════════════════════════════════════════════════════════
+_ROOT_LEVEL_STALE = [
+    "Containers", "Formulas", "Main_Data", "Variables", "Outputs",
+]
+
+_SUBFOLDER_CANON = {
+    "containers":                "containers",
+    "container":                 "containers",
+    "formulas":                  "formulas",
+    "formula":                   "formulas",
+    "main_data":                 "main_data",
+    "maindata":                  "main_data",
+    "outputs":                   "outputs",
+    "output":                    "outputs",
+    "sincelast":                 "sincelast",
+    "since_last":                "sincelast",
+    "games_breakdown":           "games_breakdown",
+    "gamesbreakdown":            "games_breakdown",
+    "cvi_matrix":                "container_variable_inputs",
+    "cvimatrix":                 "container_variable_inputs",
+    "container_variable_inputs": "container_variable_inputs",
+    "containervariableinputs":   "container_variable_inputs",
+    "variable_inputs":           "variable_inputs",
+    "variableinputs":            "variable_inputs",
+}
+
+
+def _norm(name: str) -> str:
+    return name.lower().replace(" ", "_").replace("-", "_")
+
+
+def _startup_migrate(root: Path):
+    """Idempotent startup migration — safe to run every launch."""
+
+    # ── Step 1: remove stale empty root-level folders ──────────────────────
+    for name in _ROOT_LEVEL_STALE:
+        p = root / name
+        if p.is_dir():
+            contents = [x for x in p.iterdir() if not x.name.startswith(".")]
+            if not contents:
+                try:
+                    _shutil.rmtree(str(p))
+                except Exception:
+                    pass
+            # Non-empty root-level folders are handled in steps 4 & 5 below
+
+    games_dir = root / "Games"
+    if not games_dir.is_dir():
+        return
+
+    for game in ["SAT", "OZ", "PB", "MWF", "SFL"]:
+        gp = games_dir / game
+        if not gp.is_dir():
+            continue
+        gk = game.lower()
+        suffix = f"_{gk}"
+
+        # ── Step 2: rename top-level game subfolders ────────────────────────
+        for entry in sorted(gp.iterdir()):
+            if not entry.is_dir():
+                continue
+            key = _norm(entry.name)
+            if key == "variables":
+                continue  # handled in step 3
+            # strip existing suffix before lookup
+            if key.endswith(suffix):
+                key = key[: -len(suffix)]
+            canonical = _SUBFOLDER_CANON.get(key)
+            if canonical is None:
+                continue
+            desired = gp / f"{canonical}{suffix}"
+            if entry != desired and not desired.exists():
+                try:
+                    entry.rename(desired)
+                except Exception:
+                    pass
+
+        # ── Step 3: flatten old Variables/ tree ────────────────────────────
+        old_vars = gp / "Variables"
+        if not old_vars.is_dir():
+            continue
+
+        var_inputs_dst = gp / f"variable_inputs_{gk}"
+        cvi_dst        = gp / f"container_variable_inputs_{gk}"
+
+        # Variables/Scraper → variable_inputs_{gk}/Scraper
+        src = old_vars / "Scraper"
+        dst = var_inputs_dst / "Scraper"
+        if src.is_dir() and not dst.exists():
+            var_inputs_dst.mkdir(parents=True, exist_ok=True)
+            try:
+                src.rename(dst)
+            except Exception:
+                pass
+
+        # Variables/Variable_Elements/* → variable_inputs_{gk}/ (flatten)
+        var_elem = old_vars / "Variable_Elements"
+        if var_elem.is_dir():
+            var_inputs_dst.mkdir(parents=True, exist_ok=True)
+            for item in sorted(var_elem.iterdir()):
+                dst_item = var_inputs_dst / item.name
+                if not dst_item.exists():
+                    try:
+                        item.rename(dst_item)
+                    except Exception:
+                        pass
+            # Remove shell if now empty
+            remaining = [x for x in var_elem.iterdir()
+                         if not x.name.startswith(".")]
+            if not remaining:
+                try:
+                    var_elem.rmdir()
+                except Exception:
+                    pass
+
+        # Variables/Container_Variable_Inputs → container_variable_inputs_{gk}
+        src_cvi = old_vars / "Container_Variable_Inputs"
+        if src_cvi.is_dir() and not cvi_dst.exists():
+            try:
+                src_cvi.rename(cvi_dst)
+            except Exception:
+                pass
+
+        # Remove empty Variables/ shell
+        remaining = [x for x in old_vars.iterdir()
+                     if not x.name.startswith(".")]
+        if not remaining:
+            try:
+                old_vars.rmdir()
+            except Exception:
+                pass
+
+    # ── Step 4: flatten root-level Variables/ → Games/SAT/variable_inputs_sat/
+    #    (old global Variables/ before game-specific structure was introduced)
+    root_vars = root / "Variables"
+    if root_vars.is_dir():
+        sat_path = root / "Games" / "SAT"
+        if sat_path.is_dir():
+            vi_dst  = sat_path / "variable_inputs_sat"
+            cvi_dst2 = sat_path / "container_variable_inputs_sat"
+
+            src_sc = root_vars / "Scraper"
+            dst_sc = vi_dst / "Scraper"
+            if src_sc.is_dir() and not dst_sc.exists():
+                vi_dst.mkdir(parents=True, exist_ok=True)
+                try:
+                    src_sc.rename(dst_sc)
+                except Exception:
+                    pass
+
+            ve_dir = root_vars / "Variable_Elements"
+            if ve_dir.is_dir():
+                vi_dst.mkdir(parents=True, exist_ok=True)
+                for item in sorted(ve_dir.iterdir()):
+                    if item.name.startswith("."):
+                        continue
+                    dst_item = vi_dst / item.name
+                    if not dst_item.exists():
+                        try:
+                            item.rename(dst_item)
+                        except Exception:
+                            pass
+                rem = [x for x in ve_dir.iterdir() if not x.name.startswith(".")]
+                if not rem:
+                    try:
+                        ve_dir.rmdir()
+                    except Exception:
+                        pass
+
+            src_cvi2 = root_vars / "Container_Variable_Inputs"
+            if src_cvi2.is_dir() and not cvi_dst2.exists():
+                try:
+                    src_cvi2.rename(cvi_dst2)
+                except Exception:
+                    pass
+
+            rem_rv = [x for x in root_vars.iterdir() if not x.name.startswith(".")]
+            if not rem_rv:
+                try:
+                    root_vars.rmdir()
+                except Exception:
+                    pass
+
+    # ── Step 5: move root-level Formulas/ → Games/SAT/formulas_sat/
+    #    (old global Formulas/ before game-specific structure)
+    root_formulas = root / "Formulas"
+    if root_formulas.is_dir():
+        sat_path = root / "Games" / "SAT"
+        if sat_path.is_dir():
+            sat_formulas_dst = sat_path / "formulas_sat"
+            sat_formulas_dst.mkdir(parents=True, exist_ok=True)
+            for item in sorted(root_formulas.iterdir()):
+                if item.name.startswith("."):
+                    continue
+                dst_item = sat_formulas_dst / item.name
+                if not dst_item.exists():
+                    try:
+                        item.rename(dst_item)
+                    except Exception:
+                        pass
+            rem_rf = [x for x in root_formulas.iterdir() if not x.name.startswith(".")]
+            if not rem_rf:
+                try:
+                    root_formulas.rmdir()
+                except Exception:
+                    pass
+
+
+_startup_migrate(ROOT)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONSTANTS
+# ═══════════════════════════════════════════════════════════════════════════════
 TARGET_STATES = ["NSW","VIC","QLD","WA","SA","TAS","ACT","NT"]
 
 STATE_POSTCODES = {
