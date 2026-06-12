@@ -229,6 +229,7 @@ if not _config_path.exists():
 # ═══════════════════════════════════════════════════════════════════════════════
 from syndicate_core.config import *
 from syndicate_core.scraping import *
+from syndicate_core.pipeline import *
 
 SCRAPE_URL = "https://www.thelott.com/syndicates?postcode={pc}"
 SCRAPE_URL_WA = "https://www.lotterywest.wa.gov.au/play-online/syndicate-games?postcode={pc}"
@@ -243,208 +244,6 @@ SCRAPE_HEADERS = {
 }
 
 
-def split_d_by_game(src_csv: Path, root: Path) -> dict:
-    """
-    Split a raw D_*.csv file by the Games column into per-game Direct/ folders.
-
-    Handles:
-    - Single game rows       → copied to that game's Direct/ folder
-    - Pipe-separated rows    → a copy goes to EACH matching game folder
-    - None-mapped games      → skipped intentionally (Super 66, Lucky Lotteries)
-    - Unknown game names     → logged in _unknown_games for inspection
-
-    Returns dict: {game_key: row_count_written, '_unknown_games': [...]}
-    """
-    try:
-        df = pd.read_csv(src_csv)
-    except Exception as ex:
-        return {"error": str(ex)}
-
-    if "Games" not in df.columns:
-        return {"error": "No 'Games' column found in file"}
-
-    # Accumulate rows per game key
-    game_rows: dict[str, list] = {k: [] for k in GAME_KEYS}
-    unknown_games: set = set()
-    skipped_games: set = set()
-
-    for _, row in df.iterrows():
-        raw_games = str(row.get("Games", "")).strip()
-        if not raw_games or raw_games == "nan":
-            continue
-
-        # Split pipe-separated multi-game entries
-        parts = [g.strip() for g in raw_games.split("|")]
-
-        # Build a mapping from destination game key → canonical game name for that key
-        matched: dict[str, str] = {}
-        for part in parts:
-            if part not in GAME_NAME_MAP:
-                unknown_games.add(part)
-            else:
-                gkey = GAME_NAME_MAP[part]
-                if gkey is None:
-                    skipped_games.add(part)  # intentionally skipped
-                else:
-                    matched[gkey] = part  # keep last canonical name per key
-
-        for gkey, canonical_name in matched.items():
-            # Overwrite Games to the single target game so re-running split never
-            # re-routes this row to other game folders (pipe value would cause that).
-            out_row = row.copy()
-            out_row["Games"] = canonical_name
-            game_rows[gkey].append(out_row)
-
-    # Save each game's rows to its Direct/ folder
-    state_tag = src_csv.stem   # e.g. "D_NSW_NSW"
-    results = {}
-
-    # Columns the downstream pipeline keeps. The row-based collation reads ONLY
-    # w-columns for D (via _to_w_rows), so identity/label columns can no longer leak
-    # into numeric output — which means we can safely retain Draw_Number (+ Draw_Date)
-    # here. The draw number is essential for per-draw coverage analysis.
-    # Postcode and State are required: _picks_columns() lists them as preferred and
-    # _picks_dedup() uses them as part of the row identity key.
-    def _clean_for_pipeline(gdf: pd.DataFrame) -> pd.DataFrame:
-        w_cols = sorted([c for c in gdf.columns if re.match(r'^w\d+$', str(c), re.I)],
-                        key=lambda x: int(str(x)[1:]))
-        keep = [c for c in ("Syndicate_ID", "Syndicate_Name", "Game", "Games",
-                            "Draw_Number", "Draw_Date", "Postcode", "State")
-                if c in gdf.columns]
-        if "PB" in gdf.columns:
-            keep.append("PB")
-        keep += w_cols
-        return gdf[keep]
-
-    for gkey, rows in game_rows.items():
-        if not rows:
-            results[gkey] = 0
-            continue
-        raw_count = len(rows)
-        gdf = pd.DataFrame(rows).reset_index(drop=True)
-        gdf = _clean_for_pipeline(gdf)
-        _warn_row_shrink(f"split_d_by_game/{state_tag}/{gkey}", raw_count, len(gdf))
-        dest_dir = game_dirs(gkey)["Direct"]
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest_file = dest_dir / f"{state_tag}_{gkey}.csv"
-        gdf.to_csv(dest_file, index=False)
-        results[gkey] = len(gdf)
-
-    if unknown_games:
-        results["_unknown_games"] = sorted(unknown_games)
-    if skipped_games:
-        results["_skipped_games"] = sorted(skipped_games)
-
-    return results
-
-
-def _warn_row_shrink(label: str, before: int, after: int, threshold: float = 0.05) -> None:
-    """Log a warning when a pipeline step drops more than `threshold` of rows."""
-    import logging as _log
-    if before > 0 and (before - after) / before > threshold:
-        pct = (before - after) / before * 100
-        _log.warning(
-            "[row-count] %s: %d → %d rows (%.1f%% dropped — exceeds %.0f%% threshold)",
-            label, before, after, pct, threshold * 100,
-        )
-
-
-def combine_states_for_game(game_key: str) -> dict:
-    """Merge every per-state split file for a game into ONE national file.
-
-    Reads all D_<STATE>_<game>.csv in the game's Games_Breakdown folder (e.g.
-    D_NSW_pb.csv, D_VIC_pb.csv, …), concatenates them — each state's syndicates
-    are distinct, so we keep them all (a "national view") — drops only rows with
-    duplicate Syndicate_IDs (guards against an accidental re-run without losing
-    valid unique rows from different states), and writes D_ALL_<game>.csv.
-    Returns {"states": [...], "files": n, "rows": total}.
-    """
-    gb = game_dirs(game_key)["Games_Breakdown"]
-    parts, states = [], []
-    for fp in sorted(gb.glob(f"D_*_{game_key}.csv")):
-        if fp.name.startswith("D_ALL_"):
-            continue
-        try:
-            df = pd.read_csv(fp)
-        except Exception as _read_err:
-            import logging as _lg
-            _lg.warning("combine_states_for_game: skipping unreadable file %s — %s",
-                        fp.name, _read_err)
-            continue
-        if df.empty:
-            continue
-        # state tag sits between "D_" and f"_{game_key}.csv"
-        tag = fp.stem[2:]
-        if tag.endswith(f"_{game_key}"):
-            tag = tag[: -(len(game_key) + 1)]
-        states.append(tag)
-        parts.append(df)
-    if not parts:
-        return {"states": [], "files": 0, "rows": 0}
-    combined = pd.concat(parts, ignore_index=True)
-    before = len(combined)
-    # Dedup on Syndicate_ID only — guards against re-running the same state file
-    # without collapsing valid cross-state rows that happen to share all field values.
-    dedup_cols = [c for c in ["Syndicate_ID"] if c in combined.columns]
-    combined = (combined.drop_duplicates(subset=dedup_cols, keep="first")
-                if dedup_cols else combined.drop_duplicates())
-    combined = combined.reset_index(drop=True)
-    _warn_row_shrink(f"combine_states_for_game({game_key})", before, len(combined))
-    out = gb / f"D_ALL_{game_key}.csv"
-    _write_csv_atomic(out, combined, index=False)
-    return {"states": states, "files": len(parts),
-            "rows": len(combined), "dropped_dups": before - len(combined),
-            "path": str(out)}
-
-
-def game_dirs(game_key: str) -> dict:
-    """Return DIRS-like dict scoped to a specific game folder.
-
-    All top-level subfolders are suffixed with _{game_key} so each game's
-    folders are visually distinct and never confused with another game's data.
-    e.g. Games/SAT/main_data_sat/, Games/OZ/formulas_oz/, etc.
-    """
-    g  = ROOT / "Games" / game_key.upper()
-    gk = game_key.lower()
-
-    # Named intermediate paths used by multiple sub-entries
-    var_inputs = g / f"variable_inputs_{gk}"   # was Variables/Variable_Elements
-    gb         = g / f"games_breakdown_{gk}"   # per-game split D lives here
-    formulas   = g / f"formulas_{gk}"
-
-    d = {
-        "Game":            g,
-        "Main_Data":       g / f"main_data_{gk}",
-        "Outputs":         g / f"outputs_{gk}",
-        "Formulas":        formulas,
-        "Containers":      g / f"containers_{gk}",
-        "Scraper":         var_inputs / "Scraper",
-        "Games_Breakdown": gb,
-        "Direct":          gb,      # alias (legacy key) → same Games_Breakdown folder
-        "Base":            var_inputs / "Base",
-        "Splits":          var_inputs / "Splits",
-        "Splits_Combi":    var_inputs / "Splits_Combi",
-        "Rainbow":         var_inputs / "Rainbow",
-        "ExcelPro":        var_inputs / "ExcelPro",
-        "CVI":             g / f"container_variable_inputs_{gk}",
-        "Selected_Counts": formulas / "Selected_Counts",
-        "SinceLast":       g / f"sincelast_{gk}",
-    }
-    for p in d.values():
-        p.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def active_game() -> str:
-    return st.session_state.get("active_game", "sat")
-
-
-def active_game_dirs() -> dict:
-    return game_dirs(active_game())
-
-
-def active_game_cfg() -> dict:
-    return GAMES_CFG[active_game()]
 
 # ── Naming convention helpers ──────────────────────────────────────────────
 def parse_main_filename(fname: str) -> dict:
@@ -1015,24 +814,6 @@ def _load_sets_file(path: Path) -> pd.DataFrame:
     return df
 
 
-def _write_csv_atomic(path: Path, df: pd.DataFrame, **kwargs) -> None:
-    """Write df to path atomically: write to .tmp then os.replace().
-
-    Prevents half-written files on crash. pandas to_csv() opens in 'w' mode
-    which immediately truncates the destination; a crash mid-write leaves an
-    empty or partial file that pandas then silently reads back as fewer rows.
-    """
-    import os as _os
-    tmp = path.with_suffix(".tmp")
-    try:
-        df.to_csv(tmp, **kwargs)
-        _os.replace(tmp, path)
-    except Exception:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
-        raise
 
 
 def _save_df(df: pd.DataFrame, path: Path):
@@ -3440,7 +3221,8 @@ with st.expander("🗂️ Game Breakdown — promote & split by game", expanded=
             st.code(
                 f"cd {script_path.parent} && python3 -c \"\n"
                 f"import sys; sys.path.insert(0, '.')\n"
-                f"from masterapp import split_d_by_game, combine_states_for_game, ROOT, DIRS\n"
+                f"from syndicate_core.pipeline import split_d_by_game, combine_states_for_game\n"
+                f"from syndicate_core.config import ROOT, DIRS\n"
                 f"from pathlib import Path\n"
                 f"for f in sorted(DIRS['Global_Scraper'].glob('D_*.csv')):\n"
                 f"    r = split_d_by_game(f, ROOT)\n"
