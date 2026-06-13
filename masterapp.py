@@ -2860,11 +2860,23 @@ elif page == "🔄 CVI Matrix":
 
         if st.button("🔄 BUILD W-MATRIX & SLICE Ep / Sp / So",
                      type="primary", use_container_width=True):
-            # D stays as ROWS — transposing 355k syndicates into columns would
-            # require 355k spreadsheet columns (Excel limit = 16,384) and would
-            # freeze the app in memory.  Row orientation is correct here.
-            w_mat = df_raw
-            gs_set("D", w_mat)
+            # Use the already-loaded D so any Active Draw filter is honoured.
+            # Fall back to the raw CSV only when nothing has been loaded into
+            # session state yet (first visit before the Direct tab is used).
+            _d_in_mem = gs("D", pd.DataFrame())
+            if not _d_in_mem.empty:
+                w_mat = _d_in_mem
+                _cur_draw = st.session_state.get(gkey("active_draw"))
+                if _cur_draw:
+                    st.info(f"🎯 Using Active Draw {_cur_draw} — "
+                            f"{len(w_mat):,} rows (filtered). "
+                            f"W-Matrix reflects this draw only.")
+            else:
+                w_mat = df_raw
+                gs_set("D", w_mat)   # bootstrap D from raw file (nothing was loaded)
+                st.warning("⚠️ No D loaded in session — using raw file directly. "
+                           "Active Draw filter not applied. "
+                           "Load D via the Direct tab first to use a filtered view.")
 
             mfname = chosen_fp.name.replace("D_", "CVI_Matrix_")
             cvi_out = _gdirs["CVI"] / mfname
