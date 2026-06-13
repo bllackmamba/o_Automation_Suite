@@ -3233,7 +3233,7 @@ elif page == "🧩 Variable Inputs":
                         f'({len(since_last_dict)} numbers)</div>',
                         unsafe_allow_html=True)
 
-                    st.write(f"**all_wt** (first 15 / most recent → oldest): "
+                    st.write(f"**Numbers ranked by recency** (most recent → oldest, from Since Last): "
                              f"`{all_wt[:15]}...`")
 
                     _n_groups = len(set(int(v) + 1 for v in since_last_dict.values()))
@@ -3284,6 +3284,21 @@ elif page == "🧩 Variable Inputs":
                 st.markdown("**Current R in memory:**")
                 show_paginated_df(gs("R", pd.DataFrame()), key="r_current_memory",
                                   use_container_width=True, height=200)
+
+                with st.expander("R — transposed preview (as used in collation)", expanded=False):
+                    _r_t = _to_w_rows(gs("R", pd.DataFrame()), force_column_oriented=True)
+                    if not _r_t.empty:
+                        _r_t_val = [c for c in _r_t.columns if c != "Set_Label"]
+                        _r_t = _r_t.rename(
+                            columns={c: f"w{i+1}" for i, c in enumerate(_r_t_val)})
+                        st.caption(
+                            f"{len(_r_t)} rows · each row = one combo tuple; "
+                            f"Set_Label = original R column name; "
+                            f"w1…w{len(_r_t_val)} = the numbers in that combo")
+                        show_paginated_df(_r_t, key="r_transposed_preview",
+                                          use_container_width=True, height=300)
+                    else:
+                        st.info("Transposed view is empty — R may not be column-oriented.")
 
         # ══ inner sub-tab 1 : Present Order ═══════════════════════════════
         with _r_inner[1]:
@@ -3724,6 +3739,15 @@ elif page == "🧩 Variable Inputs":
                             f"✅ Active draw set to **Draw {_draw_sel}** → "
                             f"**{len(_filt):,} rows** now in memory. "
                             f"CVI Matrix and all downstream steps use this draw only.")
+                    # Invalidate stale Sp/So/Ep results and persisted split-point
+                    # widget keys so they recompute fresh from the new D, not the
+                    # previously-loaded full D.
+                    for _k in [k for k in st.session_state
+                               if k.startswith("sp_split_") or k.startswith("so_split_")]:
+                        st.session_state.pop(_k, None)
+                    for _var in ("Sp", "So", "Ep"):
+                        gs_set(_var, pd.DataFrame())
+                    _auto_wire_generators(_gdirs, _gkey)
                     st.rerun()
 
             # ── Active draw status banner ───────────────────────────────────
@@ -3819,7 +3843,7 @@ elif page == "🧩 Variable Inputs":
         st.markdown(
             "Objects: **a** = D rows 1+2 (w1,w2) · **b** = rows 3+4 (w3,w4) · "
             "**c** = rows 5+6 (w5,w6) · **d** = rows 7+8 (w7,w8). "
-            "wt list from R; falls back to unique numbers in D's top-8 rows if R not loaded. "
+            "wt list from Since Last (all_wt) when R is loaded; falls back to unique numbers in D's top-8 rows if no Since Last data. "
             "Auto-runs when D loads — use button to re-run manually.")
 
         d_df = gs("D", pd.DataFrame())
@@ -3829,17 +3853,24 @@ elif page == "🧩 Variable Inputs":
             st.warning("Load D first (Direct tab).")
         else:
             wt_list_ep: list = []
+            _wt_source = "from D fallback"
             if not r_df.empty:
-                _wt_col = next((c for c in ("wt", "all_wt") if c in r_df.columns), None)
-                if _wt_col:
-                    wt_list_ep = r_df[_wt_col].dropna().astype(int).tolist()
+                _sl_ep_file = _gdirs["SinceLast"] / "since_last.json"
+                if _sl_ep_file.exists():
+                    try:
+                        _sl_ep_data = json.loads(_sl_ep_file.read_text())
+                        wt_list_ep = [int(n) for n in _sl_ep_data.get("all_wt", [])]
+                        if wt_list_ep:
+                            _wt_source = "from Since Last (all_wt)"
+                    except Exception:
+                        pass
             if not wt_list_ep:
                 _d_top8 = prepare_d_input_sets(d_df, 8)
                 wt_list_ep = sorted({int(v) for col in _d_top8.columns
                                      for v in _d_top8[col].dropna()})
+                _wt_source = "from D fallback"
 
-            st.write(f"wt list: **{len(wt_list_ep)} numbers** "
-                     f"({'from R' if wt_list_ep and not r_df.empty else 'from D fallback'})")
+            st.write(f"wt list: **{len(wt_list_ep)} numbers** ({_wt_source})")
 
             if st.button("▶ Run Ep", type="primary",
                          key="run_ep_btn", use_container_width=True):
