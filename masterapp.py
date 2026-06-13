@@ -1067,39 +1067,66 @@ def generate_excelpro(objects: dict, wt_list) -> pd.DataFrame:
     return pd.DataFrame({k: pd.Series(v, dtype="Int64") for k, v in result.items()})
 
 
-def _to_w_rows(df: pd.DataFrame, is_direct: bool = False) -> pd.DataFrame:
-    """Return a variable as ROW-oriented w-sets — each ROW is one combination.
+def _to_w_rows(df: pd.DataFrame, is_direct: bool = False,
+               force_column_oriented: bool = False) -> pd.DataFrame:
+    """Return a variable as ROW-oriented w-sets with a leading Set_Label column.
 
-    Spreadsheet reality: Excel allows ~1,048,576 ROWS but only 16,384 COLUMNS, so
-    the big dimension (hundreds of thousands of syndicates) must live in ROWS.
+    Returns a DataFrame: first column = "Set_Label" (original column name,
+    Syndicate_ID for D, or "w" value for B); remaining columns = integer-indexed
+    value columns 0, 1, 2, … that the caller renames to w1, w2, ….
 
-      • D (Direct): rows are ALREADY combinations → keep rows, w-columns only.
-        Identified by the caller (is_direct=True) OR by syndicate metadata — so a
-        numbers-only D (no Syndicate_ID/draw columns) is still kept as rows and NOT
-        transposed back into the column wall.
-      • B / R / Ep / Sp / So are stored COLUMN-wise (each column is a combination)
-        → TRANSPOSE so each column becomes a row.
+    Three routing paths:
+      • B (row-oriented, "w" label + pos_N columns):
+          Set_Label = "w" column; data = non-empty pos_N columns. No transpose.
+      • D (row-oriented, metadata + wN columns, or is_direct=True):
+          Set_Label = Syndicate_ID; data = w-pattern columns. No transpose.
+      • R/Ep/So/Sp (column-oriented, force_column_oriented=True for Sp):
+          Set_Label = original column name preserved via reset_index() (not drop=True).
+          Full transpose — never pre-filter to wcols, because Sp's split-key
+          names (w10, w11, w20 …) match ^w\\d+$ and would silently drop 100/112 sets.
     """
     if df is None or df.empty:
         return pd.DataFrame()
-    wcols = [c for c in df.columns if re.match(r'^w\d+$', str(c), re.I)]
-    D_META = {"syndicate_id", "syndicate_name", "game", "games", "pb",
-              "draw_number", "draw_numbers", "outlet_id", "outlet_name",
-              "postcode", "state", "share_cost", "available_shares",
-              "total_shares", "address", "suburb"}
-    has_d_meta = any(str(c).strip().lower() in D_META for c in df.columns)
 
-    if is_direct or has_d_meta:
-        # D: rows already ARE combinations — keep them, w-columns only.
-        sub = df[wcols] if wcols else df
-        out = sub.reset_index(drop=True)
+    wcols    = [c for c in df.columns if re.match(r'^w\d+$', str(c), re.I)]
+    pos_cols = [c for c in df.columns if re.match(r'^pos_\d+$', str(c), re.I)]
+    D_META   = {"syndicate_id", "syndicate_name", "game", "games", "pb",
+                "draw_number", "draw_numbers", "outlet_id", "outlet_name",
+                "postcode", "state", "share_cost", "available_shares",
+                "total_shares", "address", "suburb"}
+    has_d_meta  = any(str(c).strip().lower() in D_META for c in df.columns)
+    w_label_col = next((c for c in df.columns
+                        if str(c).strip().lower() == "w"), None)
+    is_b_style  = w_label_col is not None and len(pos_cols) > 0
+
+    if not force_column_oriented and is_b_style:
+        # B path: row-oriented — "w" column = Set_Label, pos_N columns = data.
+        # Drop pos columns that are entirely NaN (trailing empty positions).
+        live_pos = [c for c in pos_cols if df[c].notna().any()]
+        label = df[w_label_col].reset_index(drop=True)
+        sub   = df[live_pos].reset_index(drop=True)
+        out   = sub.copy()
+        out.insert(0, "Set_Label", label)
+
+    elif not force_column_oriented and (is_direct or has_d_meta):
+        # D path: row-oriented — Syndicate_ID = Set_Label, w-columns = data.
+        sid_col = next((c for c in df.columns
+                        if str(c).strip().lower() == "syndicate_id"), None)
+        sub   = df[wcols].reset_index(drop=True) if wcols else df.reset_index(drop=True)
+        label = (df[sid_col].reset_index(drop=True) if sid_col
+                 else pd.Series([pd.NA] * len(sub), dtype=object))
+        out   = sub.copy()
+        out.insert(0, "Set_Label", label)
+
     else:
-        # B/R/Ep/Sp/So: columns ARE combinations → transpose to rows.
-        sub = df[wcols] if wcols else df
-        out = sub.T.reset_index(drop=True)
-    # Drop fully-empty rows, coerce to numbers.
-    out = out.apply(pd.to_numeric, errors="coerce")
-    out = out.dropna(how="all").reset_index(drop=True)
+        # Column-oriented path (R/Ep/So, and Sp via force_column_oriented).
+        # reset_index() not drop=True — preserves original column names as Set_Label.
+        t   = df.T.reset_index()
+        out = t.rename(columns={t.columns[0]: "Set_Label"})
+
+    val_cols = [c for c in out.columns if c != "Set_Label"]
+    out[val_cols] = out[val_cols].apply(pd.to_numeric, errors="coerce")
+    out = out.dropna(subset=val_cols, how="all").reset_index(drop=True)
     return out
 
 
@@ -1255,11 +1282,14 @@ def execute_collation(components: list[str]) -> pd.DataFrame:
         df = gs(var)
         if df is None or (isinstance(df, pd.DataFrame) and df.empty):
             continue
-        block = _to_w_rows(df, is_direct=(var == "D"))   # ROW-oriented w-sets
+        block = _to_w_rows(df, is_direct=(var == "D"),
+                           force_column_oriented=(var == "Sp"))
         if block is None or block.empty:
             continue
-        block.columns = [f"w{i+1}" for i in range(len(block.columns))]
-        block.insert(0, "Source", var)  # remember which variable each row came from
+        # Rename value columns (all except Set_Label) to w1, w2, …
+        val_cols = [c for c in block.columns if c != "Set_Label"]
+        block = block.rename(columns={c: f"w{i+1}" for i, c in enumerate(val_cols)})
+        block.insert(0, "Source", var)
         pieces.append(block)
 
     if not pieces:
@@ -1267,8 +1297,10 @@ def execute_collation(components: list[str]) -> pd.DataFrame:
 
     # Stack vertically; align to the widest combination (pad missing positions).
     combined = pd.concat(pieces, axis=0, ignore_index=True)
-    wcols = [c for c in combined.columns if str(c).startswith("w")]
-    combined = combined[["Source"] + wcols]
+    wcols = sorted([c for c in combined.columns if str(c).startswith("w")],
+                   key=lambda x: int(x[1:]))
+    combined = combined[["Source", "Set_Label"] + wcols]
+    combined.insert(0, "Row_ID", range(1, len(combined) + 1))
     return combined
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -4614,15 +4646,18 @@ elif page == "📦 Container Formula":
             _df_dv = gs(_dv)
             if _df_dv is None or (isinstance(_df_dv, pd.DataFrame) and _df_dv.empty):
                 continue
-            _block = _to_w_rows(_df_dv, is_direct=(_dv == "D"))
+            _block = _to_w_rows(_df_dv, is_direct=(_dv == "D"),
+                                 force_column_oriented=(_dv == "Sp"))
             if _block is None or _block.empty:
                 continue
             _block = _block.copy()
-            _block.columns = [f"w{i+1}" for i in range(len(_block.columns))]
+            _val_cols = [c for c in _block.columns if c != "Set_Label"]
+            _block = _block.rename(
+                columns={c: f"w{i+1}" for i, c in enumerate(_val_cols)})
             _block.insert(0, "Source", _dv)
             _demo_pieces.append(_block)
             _demo_summary.append({"Variable": _dv, "Rows": f"{len(_block):,}",
-                                   "Widest pick": len(_block.columns) - 1})
+                                   "Widest pick": len(_block.columns) - 2})
 
         if _demo_summary:
             st.markdown("**Block sizes — in stacking order:**")
