@@ -2,126 +2,263 @@
 
 ## Canonical file
 
-The one and only source file is:
-
 ```
 /Users/mamba/Desktop/Sika/o_Automation_Suite/masterapp.py
 ```
 
-Do not search for, read, or edit `Sika.py`, copies elsewhere on the filesystem, or any backup file. All fixes go here.
+Do not search for, read, or edit `Sika.py`, copies elsewhere, or any backup file. All fixes go in masterapp.py or syndicate_core/.
 
 ---
 
-## Lottolyzer URLs (verified 2026-06-11)
+## File structure (post-refactor)
 
-| Game key | URL | Notes |
-|----------|-----|-------|
-| `pb`  | `https://en.lottolyzer.com/number-frequencies/australia/powerball` | Pool 35; historical draws pre-2018 had 1–40 |
-| `oz`  | `https://en.lottolyzer.com/number-frequencies/australia/oz-lotto` | Pool 47; older-format draws may show higher numbers |
-| `sat` | `https://en.lottolyzer.com/number-frequencies/australia/tattslotto` | Pool 45, Saturday draws ~4683+. `saturday-lotto` was WRONG |
-| `sfl` | `https://en.lottolyzer.com/number-frequencies/australia/set-for-life` | Pool 44, daily draws |
-| `mwf` | `https://en.lottolyzer.com/number-frequencies/australia/weekday-windfall` | Pool 45, Mon/Wed/Fri draws ~4692+. `tatts-lotto` was WRONG (served SFL data) |
+```
+o_Automation_Suite/
+├── masterapp.py                     ← UI only (~5600 lines, Streamlit)
+├── syndicate_core/
+│   ├── __init__.py
+│   ├── config.py                    ← GAMES_CFG, CF_ROWS, COMP_MAP, DASHBOARDS, CHUNK_SIZE
+│   ├── scraping.py                  ← thelott + lottolyzer fetchers
+│   ├── pipeline.py                  ← split_d_by_game, build pipeline helpers
+│   ├── matching.py                  ← pandas + DuckDB intersection engine
+│   ├── generators.py                ← _auto_wire_generators, Ep/Sp/So slicing
+│   ├── collation.py                 ← _to_w_rows (universal transformer)
+│   └── check_config.py              ← config self-test (python3 -m syndicate_core.check_config)
+├── tests/
+│   ├── __init__.py
+│   ├── test_config.py
+│   └── test_pipeline.py             ← 26 tests, all passing
+├── .streamlit/config.toml           ← maxUploadSize=10000
+├── Main_Data/                       ← raw scraper output
+├── Variables/Variable_Elements/
+│   ├── Base/f_rules_Gclaude.xlsx    ← B variable (DO NOT auto-modify)
+│   ├── Direct/                      ← D variable CSVs
+│   ├── Splits/                      ← Sp output
+│   ├── Splits_Combi/                ← So output
+│   ├── Rainbow/                     ← R output
+│   └── ExcelPro/                    ← Ep output
+└── Games/
+    └── {GAME}/
+        ├── Main_Data/
+        ├── Outputs/
+        ├── SinceLast/since_last.json
+        └── Variables/Variable_Elements/
+```
 
-History URL is auto-derived from the frequency URL via `.replace("/number-frequencies/", "/history/")` — no separate `history_url` override needed for any game.
+Run commands:
+```bash
+streamlit run ~/Desktop/Sika/o_Automation_Suite/masterapp.py
+pytest tests/                                      # 26 tests
+python3 -m syndicate_core.check_config             # config self-test
+```
 
-Dead / wrong slugs never to use:
-- `saturday-lotto` — does not exist on lottolyzer
-- `tatts-lotto` (hyphenated) — redirects to / serves Set for Life data
-- `tattslotto` is Saturday Lotto; `weekday-windfall` is Mon/Wed/Fri — they are distinct games
+---
+
+## Game keys
+
+| Key | Game | Pool | Pick | Draw |
+|-----|------|------|------|------|
+| `pb`  | Powerball | 1–35 (+PB 1–20) | 7+1 | Thursday |
+| `oz`  | Oz Lotto | 1–47 | 7 | Tuesday |
+| `sat` | Saturday Lotto | 1–45 | 6 | Saturday |
+| `sfl` | Set for Life | 1–44 | 7 | Daily |
+| `mwf` | Mon/Wed/Fri | 1–45 | 6 | Mon/Wed/Fri |
+
+**Brand name → key mapping (critical — API returns brand names):**
+- `TattsLotto`, `Saturday Lotto`, `Gold Lotto`, `X Lotto`, `Lotto` → `sat`
+- `Monday & Wednesday Lotto`, `Monday Lotto`, `Wednesday Lotto`, `Friday Lotto` → `mwf`
+- `Powerball` → `pb` | `Oz Lotto` → `oz` | `Set for Life` → `sfl`
+- `Super 66`, `Lucky Lotteries` → **skip** (not pipeline games)
+
+---
+
+## Variable engines
+
+| Engine | Module | Input | Output |
+|--------|--------|-------|--------|
+| Ep (ExcelPro) | `excelpro.py` | Top 8 w-cols of D + B objects | `wt_ab..wt_cd` new w-sets |
+| Sp (Splits) | `task1b.py` | Top 4 w-cols of D + 4 split points | split sets `a0,a1..d0,d1` |
+| So (SplitsCombi) | `automation_vba.py` | Top 4 w-cols of D | union combinations |
+| R (Rainbow) | `task2.py` | Since Last (lottolyzer) + `to_keep` | powerset combos filtered by Since Last |
+
+**D** = Direct variable (scraped syndicates from thelott.com) — NOT Main Data. They INTERSECT in the matching engine; never join them.
+
+---
+
+## Container Formula — 17 rows + custom combos
+
+```
+1  BRD        6  BD         11 D1D2D3     16 RVI2
+2  BSD        7  BSSoD      12 S1S2S3     17 Xnn
+3  BSoD       8  BRDSSo     13 So1So2So3
+4  SD         9  B1B2B3     14 Xn
+5  SoD       10  R1R2R3     15 RVI1
+```
+
+- Rows 1–10, 12–17: use Ep, Sp, So, B, D
+- Row 11: uses R (Rainbow/Since Last) + D
+- **Custom combinations**: in addition to the 17 shortcuts, the Container Formula UI accepts user-typed combinations (e.g. `EpSpSo`) — the system tokenises the string using known variable names and routes to `execute_collation`.
+
+---
+
+## _to_w_rows — three-path routing (`syndicate_core/collation.py`)
+
+Takes any variable DataFrame, returns a tall row-oriented DataFrame: `[Set_Label, w1, w2, …]`.
+
+| Path | Trigger | Behaviour |
+|------|---------|-----------|
+| **B-style** | has `w` column + `pos_N` columns, `is_direct=False` | Row-oriented; `w` col → `Set_Label`, `pos_N` cols → data. No transpose. |
+| **D-style** | `is_direct=True` OR has D metadata columns | Row-oriented; `Syndicate_ID` → `Set_Label`, w-columns → data. No transpose. |
+| **Column-oriented** | R/Ep/So; or `force_column_oriented=True` (always used for Sp) | Transpose: each column becomes a row; original column name preserved as `Set_Label`. |
+
+`execute_collation(components)` stacks blocks vertically and adds:
+- Column 0: `Row_ID` (1-based integer)
+- Column 1: `Source` (variable name string, e.g. `"B"`, `"D"`, `"Sp"`)
+- Column 2: `Set_Label`
+- Columns 3+: `w1, w2, …` (aligned to widest row)
+
+---
+
+## Active Draw — lock/unlock behaviour
+
+Setting an **Active Draw** (CVI Matrix → Direct tab → Set Active Draw button):
+1. Filters `D` in session state to that draw only.
+2. **Invalidates** all stale `Sp`, `So`, `Ep` DataFrames in session state (set to empty).
+3. **Clears** persisted split-point widget keys (`sp_split_*`, `so_split_*`).
+4. Calls `_auto_wire_generators` to recompute from the filtered D.
+5. **BUILD W-MATRIX** button respects Active Draw — always reads `gs("D")` first; falls back to raw CSV only if D is empty (first-time bootstrap).
+
+Clearing Active Draw re-loads the full D and triggers the same invalidation cycle.
 
 ---
 
 ## Session state key convention
 
-**Game-specific data lives in top-level `st.session_state` via three helpers defined at the top of the SESSION STATE section (~line 1149):**
+Game-specific data uses three helpers (top of SESSION STATE section, ~line 386):
 
 ```python
 def gkey(name: str) -> str:
-    """Return a session_state key scoped to the active game."""
-    return f"{name}__{active_game()}"   # double underscore separator
+    return f"{name}__{active_game()}"   # double underscore
 
 def gs(name: str, default=None):
-    """Get a game-scoped session_state value, with default."""
     return st.session_state.get(gkey(name), default)
 
 def gs_set(name: str, value):
-    """Set a game-scoped session_state value."""
     st.session_state[gkey(name)] = value
-    return value
 ```
 
-**Always use these helpers for game-scoped reads/writes:**
-```python
-# Read
-df = gs("B", pd.DataFrame())
-df = gs("D", pd.DataFrame())
-d = gs("cvi", {})
+Key format: `"{name}__{game}"` e.g. `"B__sat"`, `"D__pb"`.
 
-# Write
-gs_set("B", new_df)
-gs_set("main_data", df)
+**Special cases:**
+- `_auto_wire_generators(gdirs, gk)` — uses `gk` (not `active_game()`) → write `st.session_state[f"X__{gk}"]` directly.
+- Game-selector button — uses `_gk` (clicked game) → direct `st.session_state[f"B__{_gk}"]`.
+- `_d_full_key` / `_d_draw_key` — local vars set from `gkey(...)` then used with `st.session_state[...]`.
 
-# Sub-key assignment for dict values (cvi, results)
-st.session_state.setdefault(gkey("cvi"), {})[formula_name] = result
-st.session_state.setdefault(gkey("results"), {})[db] = res
+Unscoped keys live in `S` (= `st.session_state["S"]`): `cf_active`, `auto`, `scrape_log`, `confirmed_api_url`, `cookie_str`, `container_status`, `cvi_upload_v`, `md_upload_v`, `sc_upload_v`, `main_data_auto_loaded_game`, `carry_fwd_{db}`, `sc_avail_{db}`.
+
+---
+
+## Lottolyzer URLs (verified 2026-06-11)
+
+| Game | URL |
+|------|-----|
+| `pb`  | `https://en.lottolyzer.com/number-frequencies/australia/powerball` |
+| `oz`  | `https://en.lottolyzer.com/number-frequencies/australia/oz-lotto` |
+| `sat` | `https://en.lottolyzer.com/number-frequencies/australia/tattslotto` |
+| `sfl` | `https://en.lottolyzer.com/number-frequencies/australia/set-for-life` |
+| `mwf` | `https://en.lottolyzer.com/number-frequencies/australia/weekday-windfall` |
+
+History URL: auto-derived via `.replace("/number-frequencies/", "/history/")`.
+
+**Never use:** `saturday-lotto` (DNE), `tatts-lotto` (serves SFL data).
+
+---
+
+## B variable
+
+- `Variables/Variable_Elements/Base/f_rules_Gclaude.xlsx`
+- Sheets: `w values Pb A (2)` (pb), `Ta (2)` (sat+mwf), `oz (2)` (oz), `sfl` (sfl)
+- Row 0 = w-column headers, rows 1+ = number data
+- Uploaded ONCE — **never auto-overwrite**
+
+---
+
+## Scraper — confirmed API
+
+```
+Step 1: GET https://api.thelott.com/outlet/outlets?state={STATE}&postcode_or_locality={POSTCODE}
+Step 2: GET https://api.thelott.com/syndicates/api/search?company={INT}&outlets=ID1,ID2,ID3&limit=100
+Company IDs: NSW/ACT=3, VIC/TAS=1, QLD=2, SA=6
+CRITICAL: outlets = COMMA-SEPARATED (not repeated params)
+SSL bypass required: ctx.verify_mode = ssl.CERT_NONE (intentional — do not remove)
 ```
 
-The key format is `"{name}__{game}"` (double underscore), e.g. `"B__sat"`, `"D__pb"`.
-
-**Special case: `_auto_wire_generators(gdirs, gk)`** — the `gk` parameter (renamed from `gkey` to avoid shadowing the global function) must use `st.session_state[f"X__{gk}"]` directly since the function accepts an explicit game argument rather than using `active_game()`.
-
-**Special case: game selector button** — uses `st.session_state[f"B__{_gk}"]` directly because `_gk` is the clicked game, not the currently active game.
-
-**Special case: `_d_full_key` / `_d_draw_key`** — local vars set to `gkey("D_full")` and `gkey("active_draw")`, then accessed via `st.session_state[_d_full_key]` / `st.session_state.pop(_d_draw_key, None)` etc.
-
-**Unscoped keys remain in `S` (st.session_state.S) — infrastructure/UI only:**
-```python
-S["cf_active"]                # formula UI preferences
-S["auto"]                     # UI automation flags
-S["scrape_log"]               # global scrape log
-S["confirmed_api_url"]        # global scraper config
-S["cookie_str"]               # global scraper config
-S["container_status"]         # container progress tracking
-S["cvi_upload_v"]             # widget version counters
-S["md_upload_v"]
-S["sc_upload_v"]
-S["main_data_auto_loaded_game"]   # sentinel for last auto-loaded game
-S["carry_fwd_{db}"]           # per-dashboard, not per-game
-S["sc_avail_{db}"]            # per-dashboard, not per-game
+Run sweeps from terminal (not Streamlit — SSL restrictions):
+```bash
+cd ~/Desktop/Sika/o_Automation_Suite
+python3 thelott_syndicate_scraper.py sweep ALL
 ```
 
-**`_init_state()` guard:** `if "S" in st.session_state and gkey("B") in st.session_state: return`
+---
+
+## Performance — pandas vs DuckDB
+
+| Tool | When |
+|------|------|
+| pandas | All variable engine work, B/D/Ep/Sp/So/R, CVI w-matrix, pb/sat/mwf matching |
+| DuckDB | Final matching for oz (63M rows) and sfl (44M rows) only — never load these fully into pandas |
+
+CHUNK_SIZE = 500_000. Run ONE game at a time. Test with 100K rows first.
+
+---
+
+## Coding rules
+
+1. `masterapp.py` = **UI only** after refactor. Logic lives in `syndicate_core/`. Do not collapse modules back into masterapp.
+2. Preserve all `# ═══...` section separators and comment style.
+3. Never modify `f_rules_Gclaude.xlsx` programmatically unless explicitly asked.
+4. Game keys always lowercase: `pb`, `oz`, `sat`, `sfl`, `mwf`.
+5. **D ≠ Main Data** — they INTERSECT; never join.
+6. SSL bypass is intentional — do not remove.
+7. Always use `GAMES_CFG` dict — do not hardcode game values.
+8. Prefer `pathlib.Path` over `os.path`.
+9. **Git commit after every working change.**
 
 ---
 
 ## Changelog
 
-> Before making changes, scan this list. Do not redo or revert completed fixes.
+> Scan before making changes. Do not redo or revert completed work.
 
-| Date | Fix |
-|------|-----|
-| 2026-06 | **Scraping headers** — added `_TLOTT_HEADERS` with `Accept`, `Accept-Encoding: gzip`, `User-Agent` to all lottolyzer HTTP requests to avoid 403/empty responses |
-| 2026-06 | **gzip decompression** — lottolyzer responses are gzip-compressed; added `gzip.decompress()` fallback when `urllib` does not auto-decompress |
-| 2026-06 | **Retry logic** — `_picks_fetch_retry()` retries on 403 rate-limit with throttle/cooldown before giving up |
-| 2026-06 | **Games column splitting** — when a row's `Games` cell lists multiple game names, the scraper splits it into one row per game so each B-file row belongs to exactly one game |
-| 2026-06 | **Postcode/State retention** — `Postcode` and `State` are carried through from the API fetch row into every split/pick row; listed as preferred columns in `_picks_columns()` |
-| 2026-06 | **Dedup on Syndicate_ID** — `_merge_b()` deduplicates combined B DataFrames on `Syndicate_ID` only, guarding against accidental re-runs appending duplicate rows |
-| 2026-06 | **Logging instead of silent except** — bare `except: pass` blocks replaced with explicit logging to `scrape_log` so failures are visible in the UI |
-| 2026-06-11 | **sat lottolyzer URL** — `saturday-lotto` → `tattslotto`; deleted stale `Games/SAT/sincelast_sat/` cache files |
-| 2026-06-11 | **mwf lottolyzer URL** — `tatts-lotto` → `weekday-windfall`; deleted stale `Games/MWF/sincelast_mwf/` cache files (contained Set for Life data) |
-| 2026-06-11 | **Game-scoped session state (phase 1)** — renamed 11 keys in S dict to `_{gkey}` suffix; `_gkey` hoisted to top level |
-| 2026-06-12 | **Game-scoped session state (phase 2)** — introduced `gkey()`/`gs()`/`gs_set()` helpers; game data moved from `S` dict to top-level `st.session_state` with `__{game}` double-underscore separator; `_auto_wire_generators` param renamed `gkey→gk` to avoid shadowing global; broken base-var lookups in formula join preview fixed (`S.get(b)` → `gs(b)`) |
+| Date | Change |
+|------|--------|
+| 2026-06 | **Scraping headers** — added `_TLOTT_HEADERS` with Accept, gzip, User-Agent to lottolyzer requests |
+| 2026-06 | **gzip decompression** — `gzip.decompress()` fallback when urllib does not auto-decompress |
+| 2026-06 | **Retry logic** — `_picks_fetch_retry()` retries on 403 with throttle/cooldown |
+| 2026-06 | **Games column splitting** — multi-game rows split into one row per game |
+| 2026-06 | **Postcode/State retention** — carried through from API fetch into every split/pick row |
+| 2026-06 | **Dedup on Syndicate_ID** — `_merge_b()` deduplicates on Syndicate_ID |
+| 2026-06 | **Logging instead of silent except** — bare `except: pass` replaced with scrape_log |
+| 2026-06-11 | **sat lottolyzer URL** — `saturday-lotto` → `tattslotto`; stale cache cleared |
+| 2026-06-11 | **mwf lottolyzer URL** — `tatts-lotto` → `weekday-windfall`; stale SFL-contaminated cache cleared |
+| 2026-06-11 | **Game-scoped session state (phase 1)** — 11 keys renamed with `_{gkey}` suffix |
+| 2026-06-12 | **Game-scoped session state (phase 2)** — `gkey()`/`gs()`/`gs_set()` helpers; game data moved to top-level `st.session_state` with `__{game}` separator |
+| 2026-06-14 | **syndicate_core/ refactor** — extracted config, scraping, pipeline, matching, generators, collation, check_config into `syndicate_core/` package; masterapp.py now UI-only |
+| 2026-06-14 | **tests/** — 26 tests, all passing (`pytest tests/`) |
+| 2026-06-14 | **_to_w_rows in collation.py** — three-path routing: B row-style, D row-style, R/Ep/So/Sp column-oriented (Sp always uses `force_column_oriented=True`) |
+| 2026-06-14 | **execute_collation output** — `Row_ID / Source / Set_Label / w1…wN` column format |
+| 2026-06-14 | **Active Draw invalidation** — lock/unlock now clears Sp/So/Ep and recomputes from filtered D |
+| 2026-06-14 | **BUILD W-MATRIX respects Active Draw** — reads `gs("D")` first; raw CSV fallback only on first boot |
+| 2026-06-14 | **Container Formula custom combos** — accepts user-typed combinations (e.g. `EpSpSo`) in addition to the 17 predefined shortcuts |
 
 ---
 
-## Known TODOs — Deferred Features
+## Known TODOs — Deferred
 
-These are pre-existing unfinished items, not regressions. Address AFTER the `syndicate_core/` refactor is complete.
-
-| # | Item | Source | Status |
-|---|------|--------|--------|
-| 1 | **CVI/Main filename naming scheme** — output files should be named `CVI_<game>_<formula>_<draw>.csv` and `Main_<cluster>_<game>_D<draw>.csv`. Requires touching `parse_cvi_filename`, collation save, and dashboard outputs. | §7u.A | Not implemented |
-| 2 | **Dashboard redesign** — collapse Selected/Unselected/breakdown panels behind expanders; add a per-row U/S dropdown sized to the SC length instead of the current static layout. | §7u.B | Not implemented |
-| 3 | **So-engine filter** — additional filter pass on the SplitsCombi (So) engine, noted as a separate known issue. No code exists for this yet. | §5, §7u | Not implemented |
-| 4 | **`use_container_width` → `width='stretch'`** — Streamlit deprecated `use_container_width` (removal after 2025-12-31). Low-priority cleanup; ~10 occurrences throughout masterapp.py. | §7y | Deferred |
-| 5 | **Add New Draw → B ordering bug** — new draws are appended such that the system treats them as the "first" draw instead of the "last" (most recent) for continuation purposes. `append_draw_to_b` (in masterapp.py, kept out of scraping.py during Step 3 refactor) needs review — likely an ordering/sort convention mismatch between how B is displayed (newest-first?) vs how `append_draw_to_b` inserts (concat to bottom). Also: scrolling on the B/draw history table is not working well — investigate after the ordering fix. | append_draw_to_b | Not implemented |
+| # | Item | Status |
+|---|------|--------|
+| 1 | **CVI/Main filename naming scheme** — `CVI_<game>_<formula>_<draw>.csv` + `Main_<cluster>_<game>_D<draw>.csv` | Not implemented |
+| 2 | **Dashboard redesign** — expanders for Selected/Unselected; per-row U/S dropdown | Not implemented |
+| 3 | **So-engine filter** — additional filter pass on SplitsCombi engine | Not implemented |
+| 4 | **`use_container_width` → `width='stretch'`** — Streamlit deprecated `use_container_width` | Deferred |
+| 5 | **Add New Draw → B ordering bug** — new draws appended as "first" instead of "last"; `append_draw_to_b` needs ordering fix; B/draw history table scrolling also broken | Not implemented |
