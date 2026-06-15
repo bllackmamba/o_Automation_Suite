@@ -355,6 +355,7 @@ GAMES_CFG = {
         "lottolyzer": "https://en.lottolyzer.com/number-frequencies/australia/tattslotto",
         "b_file": "Base_sat.xlsx", "b_sheet": "B_sat",
         "b_sheet_legacy": "Ta (2)", "thelott_key": "sat",
+        "b_hist_start": 43,
     },
     "sfl": {
         "label": "Set for Life", "emoji": "🟢", "pool": 44, "pick": 7,

@@ -233,6 +233,7 @@ from syndicate_core.pipeline import *
 from syndicate_core.matching import *
 from syndicate_core.generators import *
 from syndicate_core.collation import *
+from syndicate_core.b_sync import *
 
 SCRAPE_URL = "https://www.thelott.com/syndicates?postcode={pc}"
 SCRAPE_URL_WA = "https://www.lotterywest.wa.gov.au/play-online/syndicate-games?postcode={pc}"
@@ -4054,8 +4055,69 @@ elif page == "🧩 Variable Inputs":
 
         st.markdown("---")
 
-        # ── Section 3: Manual Draw Entry (update B) ──────────────────────────────
-        st.markdown("### Add New Draw → B")
+        # ── Section 3: B Sync / Add Draw ─────────────────────────────────────────
+        st.markdown("### B Sync / Add Draw")
+
+        # ── 3a: Sync from draw history ────────────────────────────────────────
+        st.markdown("#### 🔄 Sync B to latest")
+        _b_hist_start_cfg = _gcfg.get("b_hist_start")
+        if _b_hist_start_cfg is None:
+            st.info(f"ℹ️ `b_hist_start` not configured for **{_gcfg['label']}** — "
+                    f"sync unavailable. Use manual entry below.")
+        else:
+            st.caption(
+                f"Compares B row {_b_hist_start_cfg} (current newest draw) against "
+                f"cached draw history to detect missing draws.")
+
+            _hist_for_sync = gs("DrawHist", pd.DataFrame())
+            if _hist_for_sync.empty:
+                st.warning("⚠️ No draw history in memory — fetch draw history (section 2 above) first.")
+            else:
+                _do_sync = st.button("🔄 Sync B to latest", key="stats_sync_b")
+                if _do_sync:
+                    _b_for_sync = gs("B", pd.DataFrame())
+                    _sync_res = sync_b_with_latest_draws(_gkey, _b_for_sync, _hist_for_sync)
+                    S[f"b_sync_result__{_gkey}"] = _sync_res
+
+                _sync_res = S.get(f"b_sync_result__{_gkey}")
+                if _sync_res:
+                    _s = _sync_res["status"]
+                    if _s == "current":
+                        st.success(f"✅ B is current through draw **{_sync_res['draw']}** "
+                                   f"— numbers: {_sync_res['numbers']}")
+                    elif _s == "behind":
+                        st.warning(f"⚠️ B is **{_sync_res['count']} draw(s) behind**.")
+                        _missing_df = pd.DataFrame(_sync_res["missing_draws"])
+                        st.dataframe(_missing_df, use_container_width=True, hide_index=True)
+                        _do_apply = st.button(
+                            f"✅ Apply {_sync_res['count']} missing draw(s) to B",
+                            key="stats_sync_apply")
+                        if _do_apply:
+                            try:
+                                _b_current = gs("B", pd.DataFrame())
+                                _b_updated = append_draws_to_b(
+                                    _gkey, _b_current, _sync_res["missing_draws"])
+                                gs_set("B", _b_updated)
+                                _b_save_path = _gdirs["Base"] / f"B_{_gkey}_updated.csv"
+                                _b_updated.to_csv(_b_save_path, index=False)
+                                S.pop(f"b_sync_result__{_gkey}", None)
+                                st.success(
+                                    f"✅ Inserted {_sync_res['count']} draw(s) at row "
+                                    f"{_b_hist_start_cfg}. B now has {len(_b_updated)} rows. "
+                                    f"Saved to {_b_save_path.name}")
+                                st.caption("Re-run generators to reflect the new draw(s).")
+                                st.rerun()
+                            except Exception as _apply_ex:
+                                st.error(f"Error applying draws: {_apply_ex}")
+                    elif _s == "gap_too_large":
+                        st.error(f"❌ {_sync_res.get('detail', 'Gap too large')}")
+                    elif _s == "not_configured":
+                        st.info("ℹ️ `b_hist_start` not configured for this game.")
+
+        st.markdown("---")
+
+        # ── 3b: Manual draw entry (fallback) ─────────────────────────────────
+        st.markdown("#### ➕ Add draw manually")
         st.caption(
             "Enter the winning numbers for a new draw. They will be appended to B "
             "so the pipeline stays current. Numbers are sorted (w1=smallest) before saving.")
@@ -4078,7 +4140,6 @@ elif page == "🧩 Variable Inputs":
                     _b_updated = append_draw_to_b(_b_current, _new_nums,
                                                    draw_label=_draw_label_in.strip())
                     gs_set("B", _b_updated)
-                    # Auto-save to disk
                     _b_save_path = _gdirs["Base"] / f"B_{_gkey}_updated.csv"
                     _b_updated.to_csv(_b_save_path, index=False)
                     st.success(
@@ -4093,11 +4154,9 @@ elif page == "🧩 Variable Inputs":
         _b_for_stats = gs("B", pd.DataFrame())
         if not _b_for_stats.empty:
             if "w" in _b_for_stats.columns:
-                # Row-oriented: each row is a w-set
                 _tail_b = _b_for_stats.tail(5)
                 st.caption(f"Last 5 w-sets of B ({len(_b_for_stats)} total w-sets):")
             else:
-                # Legacy column-oriented
                 _wcols_b = [c for c in _b_for_stats.columns
                              if str(c).lower().startswith("w")]
                 _tail_b = _b_for_stats[_wcols_b].tail(5)
