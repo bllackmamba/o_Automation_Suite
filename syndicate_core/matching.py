@@ -28,8 +28,10 @@ __all__ = [
     "_count_str", "_breakdown_str",
     # stage helpers
     "_compute_stage_present", "_apply_stage_sc",
+    # pre-loop + fill helpers
+    "_prepare_matching_state", "_fill_exhausted_stages",
     # engines
-    "run_matching", "_parallel_worker",
+    "run_matching", "run_matching_step", "_parallel_worker",
 ]
 
 DUCKDB_THRESHOLD = 50 * 1024 * 1024   # 50 MB CSV → use DuckDB
@@ -374,54 +376,25 @@ def _apply_stage_sc(
     }
 
 
-# ── Sequential matching engine ────────────────────────────────────────────────
+# ── Pre-loop state preparation ────────────────────────────────────────────────
 
-def run_matching(main_df: pd.DataFrame,
-                 cvi_df:  pd.DataFrame,
-                 sc_dict: dict,
-                 carry_fwd: dict,
-                 main_path=None) -> dict:
+def _prepare_matching_state(
+    main_df: pd.DataFrame,
+    cvi_df: pd.DataFrame,
+    main_path=None,
+) -> "dict | None":
     """
-    Sequential matching engine — corrected carry-forward logic.
+    Extract pre-loop setup shared by run_matching and run_matching_step.
 
-    carry_fwd[w] = "U" or "S"  (default "U" for any missing key)
-    Meaning of toggle at Row N:
-        "U" → Row N's present = Row N-1's UNSELECTED
-        "S" → Row N's present = Row N-1's SELECTED
-
-    Main Count: pre-computed once against ORIGINAL main_df for every w-column.
-                Never recalculated regardless of carry-forward state.
-
-    Memory: if M > DISPLAY_THRESHOLD, per-row DataFrames are NOT stored —
-            only count distributions are kept. Final stage data always stored.
-
-    main_path (optional): path to the CSV that `main_df` was loaded from. When
-        supplied AND it is a large CSV AND DuckDB is installed AND it is safe
-        (file row-count == M and the n-columns are a contiguous n1…nN block),
-        the heavy *main-count pre-pass* (one full-M scan per w-column) is run in
-        DuckDB instead of pandas. If DuckDB returns an unexpected length for any
-        column, that column silently falls back to the pandas path, so results
-        are always identical to the pure-pandas engine. Passing None (the
-        default) keeps the original all-pandas behavior.
-
-        NOTE on scope: only the pre-pass uses DuckDB. The staged carry-forward
-        matching still runs in memory on `main_df`, because each stage filters a
-        shrinking pool of rows (selected vs unselected) — that is row-level and
-        stateful, not a single SQL aggregate. So this lowers the cost of the
-        most expensive *uniform* passes but does NOT remove the need to hold
-        `main_df` in RAM. Fully streaming the staged engine is a larger,
-        separate change.
+    Returns None when either input is empty (caller handles early return).
+    Otherwise returns:
+        {"n_cols", "w_cols", "M", "small_enough",
+         "main_count_map", "main_bd_map", "main_counts_map"}
     """
     if main_df.empty or cvi_df.empty:
-        return {"selected": pd.DataFrame(), "unselected": pd.DataFrame(),
-                "fig9_table": pd.DataFrame(), "breakdown": pd.DataFrame(),
-                "debug_rows": []}
+        return None
 
     # ── Detect number columns ──────────────────────────────────────────────
-    # Prefer explicit n1…nN columns when present. Only fall back to the
-    # "≥90% numeric" heuristic when there are NO explicit n-columns — otherwise
-    # numeric metadata columns (Postcode, Length, Draw Number, …) get treated
-    # as lottery numbers and corrupt every match count.
     _explicit_n = [c for c in main_df.columns if re.match(r'^n\d+$', c, re.I)]
     if _explicit_n:
         n_cols = sorted(
@@ -429,10 +402,6 @@ def run_matching(main_df: pd.DataFrame,
             key=lambda x: int(re.sub(r'\D', '', x) or 0)
         )[:20]
     else:
-        # Name-blocklist guards against known metadata columns whose values happen
-        # to be all-numeric (Postcode, Draw_Number, etc.).  Max-value cap of 99
-        # guards against any unlisted numeric metadata column (postcodes ≥ 800,
-        # draw numbers ≥ 1000) since no Australian lottery pool exceeds 47.
         _META_BLOCKED = frozenset({
             "postcode", "draw_number", "draw_no", "draw", "length",
             "share_cost", "available_shares", "total_shares", "outlet_id",
@@ -455,20 +424,14 @@ def run_matching(main_df: pd.DataFrame,
         key=lambda x: int(x[1:])
     )
 
-    M = len(main_df)
+    M            = len(main_df)
     small_enough = (M <= DISPLAY_THRESHOLD)
 
-    # ── PRE-COMPUTE Main Count AND Main Breakdown for every w-column ──────
-    # Computed once against original M rows. Never recalculated.
-    main_count_map: dict[str, str] = {}
-    main_bd_map:    dict[str, str] = {}
+    main_count_map:  dict[str, str]        = {}
+    main_bd_map:     dict[str, str]        = {}
     main_counts_map: dict[str, np.ndarray] = {}
 
-    # ── Decide whether the pre-pass may use DuckDB (safe, opt-in) ──────────
-    # Only when: a path was given, it's a large CSV, DuckDB is installed, the
-    # file's row count matches M (so DuckDB row order lines up with main_df),
-    # and the n-columns form a contiguous n1…nN block (so _match_duckdb's
-    # generated SQL references columns that actually exist).
+    # ── Decide whether the pre-pass may use DuckDB ────────────────────────
     _duck_path = None
     try:
         if main_path is not None:
@@ -507,6 +470,123 @@ def run_matching(main_df: pd.DataFrame,
             main_count_map[w]  = "—"
             main_bd_map[w]     = "—"
             main_counts_map[w] = np.array([], dtype=np.int32)
+
+    return {
+        "n_cols":          n_cols,
+        "w_cols":          w_cols,
+        "M":               M,
+        "small_enough":    small_enough,
+        "main_count_map":  main_count_map,
+        "main_bd_map":     main_bd_map,
+        "main_counts_map": main_counts_map,
+    }
+
+
+def _fill_exhausted_stages(
+    w_cols: list,
+    start_idx: int,
+    M: int,
+    carry_fwd: dict,
+    main_count_map: dict,
+    main_bd_map: dict,
+    sc_dict: "dict | None" = None,
+    *,
+    n_cols: "list | None" = None,
+) -> "tuple[list, list]":
+    """
+    Build fig9_rows and debug_rows for stages from start_idx onward when the
+    present pool is exhausted.  sc_dict defaults to {} so "SC" is always "—"
+    when omitted (run_matching_step has no future SCs).  run_matching passes
+    its real sc_dict to preserve current behaviour exactly.
+    """
+    if sc_dict is None:
+        sc_dict = {}
+    if n_cols is None:
+        n_cols = []
+
+    fig9_rows_extra:  list = []
+    debug_rows_extra: list = []
+
+    for rw in w_cols[start_idx:]:
+        rw_num = int(rw[1:])
+        fig9_rows_extra.append({
+            "Row": f"Row {rw_num}", "Main\nData": f"M:{M}",
+            "CVI": rw, "Dir": carry_fwd.get(rw, "U"),
+            "Main\nCount": main_count_map.get(rw, "—"),
+            "Main\nBreakdown": main_bd_map.get(rw, "—"),
+            "Present\nData": "U:0", "Present\nCount": "—",
+            "SC": sc_dict.get(rw, "—"), "Selected": "S:0",
+            "Sel\nBreakdown": "—", "Unsel\nCount": "—",
+            "Unselected": "U:0", "Unsel\nBreakdown": "—",
+        })
+        debug_rows_extra.append({
+            "w": rw, "direction": carry_fwd.get(rw, "U"),
+            "cvi_numbers": [], "cvi_set": set(),
+            "present_in": 0, "present_label": "U:0",
+            "sc": [], "selected_n": 0, "unselected_n": 0,
+            "main_count_str": main_count_map.get(rw, "—"),
+            "main_bd_str":    main_bd_map.get(rw, "—"),
+            "main_counts":    np.array([], dtype=np.int32),
+            "pres_count_str": "—", "count_dist": {},
+            "note": "No present data — exhausted",
+            "sel_df": None, "unsel_df": None,
+            "main_df_wc": None, "n_cols": n_cols,
+        })
+
+    return fig9_rows_extra, debug_rows_extra
+
+
+# ── Sequential matching engine ────────────────────────────────────────────────
+
+def run_matching(main_df: pd.DataFrame,
+                 cvi_df:  pd.DataFrame,
+                 sc_dict: dict,
+                 carry_fwd: dict,
+                 main_path=None) -> dict:
+    """
+    Sequential matching engine — corrected carry-forward logic.
+
+    carry_fwd[w] = "U" or "S"  (default "U" for any missing key)
+    Meaning of toggle at Row N:
+        "U" → Row N's present = Row N-1's UNSELECTED
+        "S" → Row N's present = Row N-1's SELECTED
+
+    Main Count: pre-computed once against ORIGINAL main_df for every w-column.
+                Never recalculated regardless of carry-forward state.
+
+    Memory: if M > DISPLAY_THRESHOLD, per-row DataFrames are NOT stored —
+            only count distributions are kept. Final stage data always stored.
+
+    main_path (optional): path to the CSV that `main_df` was loaded from. When
+        supplied AND it is a large CSV AND DuckDB is installed AND it is safe
+        (file row-count == M and the n-columns are a contiguous n1…nN block),
+        the heavy *main-count pre-pass* (one full-M scan per w-column) is run in
+        DuckDB instead of pandas. If DuckDB returns an unexpected length for any
+        column, that column silently falls back to the pandas path, so results
+        are always identical to the pure-pandas engine. Passing None (the
+        default) keeps the original all-pandas behavior.
+
+        NOTE on scope: only the pre-pass uses DuckDB. The staged carry-forward
+        matching still runs in memory on `main_df`, because each stage filters a
+        shrinking pool of rows (selected vs unselected) — that is row-level and
+        stateful, not a single SQL aggregate. So this lowers the cost of the
+        most expensive *uniform* passes but does NOT remove the need to hold
+        `main_df` in RAM. Fully streaming the staged engine is a larger,
+        separate change.
+    """
+    state = _prepare_matching_state(main_df, cvi_df, main_path)
+    if state is None:
+        return {"selected": pd.DataFrame(), "unselected": pd.DataFrame(),
+                "fig9_table": pd.DataFrame(), "breakdown": pd.DataFrame(),
+                "debug_rows": []}
+
+    n_cols          = state["n_cols"]
+    w_cols          = state["w_cols"]
+    M               = state["M"]
+    small_enough    = state["small_enough"]
+    main_count_map  = state["main_count_map"]
+    main_bd_map     = state["main_bd_map"]
+    main_counts_map = state["main_counts_map"]
 
     # ── Stage state ────────────────────────────────────────────────────────
     prev_sel   = pd.DataFrame()
@@ -594,31 +674,12 @@ def run_matching(main_df: pd.DataFrame,
 
         # ── If present exhausted, fill remaining rows ─────────────────
         if result["exhausted"]:
-            for rw in w_cols[idx + 1:]:
-                rw_num = int(rw[1:])
-                fig9_rows.append({
-                    "Row": f"Row {rw_num}", "Main\nData": f"M:{M}",
-                    "CVI": rw, "Dir": carry_fwd.get(rw, "U"),
-                    "Main\nCount": main_count_map.get(rw, "—"),
-                    "Main\nBreakdown": main_bd_map.get(rw, "—"),
-                    "Present\nData": "U:0", "Present\nCount": "—",
-                    "SC": sc_dict.get(rw, "—"), "Selected": "S:0",
-                    "Sel\nBreakdown": "—", "Unsel\nCount": "—",
-                    "Unselected": "U:0", "Unsel\nBreakdown": "—",
-                })
-                debug_rows.append({
-                    "w": rw, "direction": carry_fwd.get(rw, "U"),
-                    "cvi_numbers": [], "cvi_set": set(),
-                    "present_in": 0, "present_label": "U:0",
-                    "sc": [], "selected_n": 0, "unselected_n": 0,
-                    "main_count_str": main_count_map.get(rw, "—"),
-                    "main_bd_str": main_bd_map.get(rw, "—"),
-                    "main_counts": np.array([], dtype=np.int32),
-                    "pres_count_str": "—", "count_dist": {},
-                    "note": "No present data — exhausted",
-                    "sel_df": None, "unsel_df": None,
-                    "main_df_wc": None, "n_cols": n_cols,
-                })
+            fig9_extra, debug_extra = _fill_exhausted_stages(
+                w_cols, idx + 1, M, carry_fwd,
+                main_count_map, main_bd_map, sc_dict,
+                n_cols=n_cols)
+            fig9_rows  += fig9_extra
+            debug_rows += debug_extra
             break
 
     _final_total = len(final_sel) + len(final_unsel)
@@ -636,6 +697,235 @@ def run_matching(main_df: pd.DataFrame,
         "breakdown":   pd.DataFrame(breakdown_rows).fillna(0),
         "debug_rows":  debug_rows,
         "n_cols":      n_cols,
+        "small_enough": small_enough,
+    }
+
+
+# ── Step-wise matching engine (SC Available: NO) ─────────────────────────────
+
+def run_matching_step(
+    resume_state,
+    sc_for_stage=None,
+    *,
+    main_df: pd.DataFrame = None,
+    cvi_df:  pd.DataFrame = None,
+    carry_fwd: dict = None,
+    main_path=None,
+) -> dict:
+    """
+    Step-wise version of run_matching for interactive "SC Available: NO" mode.
+
+    Call 1 — Setup (resume_state=None):
+        Pass main_df, cvi_df, carry_fwd (and optionally main_path).
+        Returns {"paused": True, "awaiting_sc_for_stage": idx, "w": w,
+                 "count_dist": {...}, "resume_state": {...}}
+        or {"paused": False, ...} when every stage has empty CVI.
+
+    Call 2+ — Resume (resume_state + sc_for_stage given):
+        main_df/cvi_df/carry_fwd kwargs are ignored; state comes from
+        resume_state.  Applies the SC to the cached stage, then auto-advances
+        through any empty-CVI stages and pauses again (or returns final result
+        if the run completes or exhausts).
+
+    Final result shape (paused=False) is a superset of run_matching's return:
+        {"paused": False, "selected", "unselected", "fig9_table",
+         "breakdown", "debug_rows", "n_cols", "small_enough"}
+    """
+    _EMPTY = {
+        "paused":       False,
+        "selected":     pd.DataFrame(),
+        "unselected":   pd.DataFrame(),
+        "fig9_table":   pd.DataFrame(),
+        "breakdown":    pd.DataFrame(),
+        "debug_rows":   [],
+    }
+
+    # ── Setup ─────────────────────────────────────────────────────────────
+    if resume_state is None:
+        if carry_fwd is None:
+            carry_fwd = {}
+        state = _prepare_matching_state(main_df, cvi_df, main_path)
+        if state is None:
+            return _EMPTY
+
+        n_cols          = state["n_cols"]
+        w_cols          = state["w_cols"]
+        M               = state["M"]
+        small_enough    = state["small_enough"]
+        main_count_map  = state["main_count_map"]
+        main_bd_map     = state["main_bd_map"]
+        main_counts_map = state["main_counts_map"]
+
+        prev_sel       = pd.DataFrame()
+        prev_unsel     = main_df.copy().reset_index(drop=True)
+        stage_idx      = 0
+        fig9_rows:     list = []
+        debug_rows:    list = []
+        breakdown_rows: list = []
+        final_sel      = pd.DataFrame()
+        final_unsel    = prev_unsel.copy()
+
+    # ── Resume ────────────────────────────────────────────────────────────
+    else:
+        rs = resume_state
+        stage_idx       = rs["stage_idx"]
+        prev_sel        = rs["prev_sel"]
+        prev_unsel      = rs["prev_unsel"]
+        n_cols          = rs["n_cols"]
+        w_cols          = rs["w_cols"]
+        M               = rs["M"]
+        small_enough    = rs["small_enough"]
+        main_count_map  = rs["main_count_map"]
+        main_bd_map     = rs["main_bd_map"]
+        main_counts_map = rs["main_counts_map"]
+        main_df         = rs["main_df"]
+        cvi_df          = rs["cvi_df"]
+        carry_fwd       = rs["carry_fwd"]
+        fig9_rows       = rs["fig9_rows"]
+        debug_rows      = rs["debug_rows"]
+        breakdown_rows  = rs["breakdown_rows"]
+        final_sel       = rs["final_sel"]
+        final_unsel     = rs["final_unsel"]
+        cached_stage_info = rs["cached_stage_info"]
+
+        w     = cached_stage_info["w"]
+        w_num = cached_stage_info["w_num"]
+
+        # Normalise sc_for_stage (same coercion as run_matching's sc_this block)
+        sc_this = sc_for_stage if sc_for_stage is not None else []
+        if isinstance(sc_this, (int, float)):
+            sc_this = [int(sc_this)]
+        elif isinstance(sc_this, str):
+            sc_this = [int(x.strip()) for x in sc_this.split(",")
+                       if x.strip().lstrip('-').isdigit()]
+        sc_set = set(sc_this)
+        sc_str = ",".join(str(s) for s in sorted(sc_set)) if sc_set else "—"
+
+        result = _apply_stage_sc(
+            cached_stage_info, sc_set, sc_str, w, w_num, M,
+            main_df, main_count_map, main_bd_map, main_counts_map,
+            n_cols, small_enough)
+
+        fig9_rows.append(result["fig9_row"])
+        breakdown_rows.append(result["breakdown_row"])
+        debug_rows.append(result["debug_row"])
+
+        prev_sel    = result["new_prev_sel"]
+        prev_unsel  = result["new_prev_unsel"]
+        final_sel   = result["sel_df"]
+        final_unsel = result["unsel_df"]
+
+        if result["exhausted"]:
+            fig9_extra, debug_extra = _fill_exhausted_stages(
+                w_cols, stage_idx + 1, M, carry_fwd,
+                main_count_map, main_bd_map, n_cols=n_cols)
+            fig9_rows  += fig9_extra
+            debug_rows += debug_extra
+            return {
+                "paused":       False,
+                "selected":     final_sel,
+                "unselected":   final_unsel,
+                "fig9_table":   pd.DataFrame(fig9_rows),
+                "breakdown":    pd.DataFrame(breakdown_rows).fillna(0),
+                "debug_rows":   debug_rows,
+                "n_cols":       n_cols,
+                "small_enough": small_enough,
+            }
+
+        stage_idx += 1
+
+    # ── PHASE A: advance through empty-CVI stages, pause at first real stage ─
+    while stage_idx < len(w_cols):
+        stage_info = _compute_stage_present(
+            stage_idx, w_cols, carry_fwd,
+            prev_sel, prev_unsel,
+            main_df, cvi_df, n_cols, M)
+
+        w         = stage_info["w"]
+        w_num     = stage_info["w_num"]
+        direction = stage_info["direction"]
+
+        if stage_info["empty_cvi"]:
+            present_df    = stage_info["present_df"]
+            present_label = stage_info["present_label"]
+            present_count = stage_info["present_count"]
+            fig9_rows.append({
+                "Row":             f"Row {w_num}",
+                "Main\nData":      f"M:{M}",
+                "CVI":             w,
+                "Dir":             direction,
+                "Main\nCount":     main_count_map[w],
+                "Main\nBreakdown": main_bd_map[w],
+                "Present\nData":   present_label,
+                "Present\nCount":  "— No CVI",
+                "SC":              "—",
+                "Selected":        "S:0",
+                "Sel\nBreakdown":  "—",
+                "Unsel\nCount":    "—",
+                "Unselected":      f"U:{present_count} (fwd)",
+                "Unsel\nBreakdown":"—",
+            })
+            debug_rows.append({
+                "w": w, "direction": direction,
+                "cvi_numbers": [], "cvi_set": set(),
+                "present_in": present_count, "present_label": present_label,
+                "sc": [], "selected_n": 0,
+                "unselected_n": present_count,
+                "main_count_str": main_count_map[w],
+                "main_bd_str":    main_bd_map[w],
+                "main_counts":    main_counts_map[w],
+                "pres_count_str": "—", "count_dist": {},
+                "note": "No CVI data — all carry forward",
+                "sel_df": None,
+                "unsel_df": present_df.copy() if small_enough else None,
+                "n_cols": n_cols,
+            })
+            prev_sel    = pd.DataFrame()
+            prev_unsel  = present_df.copy()
+            final_sel   = pd.DataFrame()
+            final_unsel = present_df.copy()
+            stage_idx  += 1
+            continue
+
+        # Non-empty CVI — compute count_dist and pause for SC input
+        _, _, _, count_dist = _breakdown_str(stage_info["pres_counts"], set())
+        return {
+            "paused":                True,
+            "awaiting_sc_for_stage": stage_idx,
+            "w":                     w,
+            "count_dist":            count_dist,
+            "resume_state": {
+                "stage_idx":        stage_idx,
+                "prev_sel":         prev_sel,
+                "prev_unsel":       prev_unsel,
+                "main_count_map":   main_count_map,
+                "main_bd_map":      main_bd_map,
+                "main_counts_map":  main_counts_map,
+                "n_cols":           n_cols,
+                "w_cols":           w_cols,
+                "M":                M,
+                "small_enough":     small_enough,
+                "main_df":          main_df,
+                "cvi_df":           cvi_df,
+                "carry_fwd":        carry_fwd,
+                "fig9_rows":        fig9_rows,
+                "debug_rows":       debug_rows,
+                "breakdown_rows":   breakdown_rows,
+                "final_sel":        final_sel,
+                "final_unsel":      final_unsel,
+                "cached_stage_info": stage_info,
+            },
+        }
+
+    # Every remaining stage was empty-CVI (or w_cols was empty) — no fill needed
+    return {
+        "paused":       False,
+        "selected":     final_sel,
+        "unselected":   final_unsel,
+        "fig9_table":   pd.DataFrame(fig9_rows),
+        "breakdown":    pd.DataFrame(breakdown_rows).fillna(0),
+        "debug_rows":   debug_rows,
+        "n_cols":       n_cols,
         "small_enough": small_enough,
     }
 
