@@ -4914,35 +4914,123 @@ elif page == "🖥️ Container Dashboards":
                      type="primary" if S[sc_avail_key]=="YES" else "secondary",
                      use_container_width=True):
             S[sc_avail_key] = "YES"
+            S.pop(f"step_state_{db}", None)
+            S.pop(f"step_pending_{db}", None)
     with sa2:
         if st.button("🔴 SC: NO (Manual)", key=f"sca_n_{db}",
                      type="primary" if S[sc_avail_key]=="NO" else "secondary",
                      use_container_width=True):
             S[sc_avail_key] = "NO"
+            S.pop(f"step_state_{db}", None)
+            S.pop(f"step_pending_{db}", None)
     if S[sc_avail_key] == "NO":
-        st.info("Manual mode: SC not provided upfront. "
-                "Process pauses after each stage for researcher to provide SC.")
+        st.caption("Manual mode — engine pauses after each stage; "
+                   "pick SC values, then Continue.")
+        st.markdown("---")
+        can_run = not main_df.empty and not cvi_df.empty
+        if not can_run:
+            st.info("📤 Upload CVI and Main Data above to enable matching.")
+
+        if S.get(f"step_state_{db}") is None:
+            # ── No step-run active: show START button ─────────────────────
+            if st.button(f"▶ START MATCHING (Step Mode) — {db}",
+                         type="primary", use_container_width=True,
+                         key=f"start_step_{db}", disabled=not can_run):
+                with st.spinner("Running to first SC decision…"):
+                    _sr = run_matching_step(
+                        resume_state=None,
+                        main_df=main_df, cvi_df=cvi_df,
+                        carry_fwd=carry_fwd,
+                        main_path=gs("main_data_path"))
+                if _sr["paused"]:
+                    S[f"step_state_{db}"]   = _sr["resume_state"]
+                    S[f"step_pending_{db}"] = {
+                        "w":                     _sr["w"],
+                        "count_dist":            _sr["count_dist"],
+                        "awaiting_sc_for_stage": _sr["awaiting_sc_for_stage"],
+                    }
+                else:
+                    st.session_state.setdefault(gkey("results"), {})[db] = _sr
+                st.rerun()
+
+        else:
+            # ── Paused mid-run: show distribution + SC picker + Continue ──
+            _pending = S[f"step_pending_{db}"]
+            _stage_w = _pending["w"]
+            _stage_i = _pending["awaiting_sc_for_stage"]
+            _cd      = _pending["count_dist"]
+
+            st.write(f"**Paused at {_stage_w}** — choose SC for this stage")
+
+            if _cd:
+                st.dataframe(
+                    pd.DataFrame([
+                        {"Count k": int(k[1:]), "Rows": v}
+                        for k, v in sorted(_cd.items())
+                    ]),
+                    use_container_width=False, hide_index=True,
+                )
+            else:
+                st.info("No rows enter this stage (pool exhausted — "
+                        "any SC choice will complete the run).")
+
+            _available_ks = sorted(int(k[1:]) for k in _cd)
+            _sc_chosen = st.multiselect(
+                f"Select count values for SC (stage {_stage_i}, {_stage_w}):",
+                _available_ks,
+                key=f"step_sc_choice_{db}_{_stage_i}",
+            )
+
+            _cc1, _cc2 = st.columns([2, 1])
+            with _cc1:
+                if st.button(f"▶ Continue — {db}", type="primary",
+                             use_container_width=True,
+                             key=f"continue_step_{db}"):
+                    with st.spinner(f"Applying SC for {_stage_w}…"):
+                        _sr = run_matching_step(
+                            S[f"step_state_{db}"],
+                            sc_for_stage=_sc_chosen)
+                    if _sr["paused"]:
+                        S[f"step_state_{db}"]   = _sr["resume_state"]
+                        S[f"step_pending_{db}"] = {
+                            "w":                     _sr["w"],
+                            "count_dist":            _sr["count_dist"],
+                            "awaiting_sc_for_stage": _sr["awaiting_sc_for_stage"],
+                        }
+                    else:
+                        st.session_state.setdefault(
+                            gkey("results"), {})[db] = _sr
+                        S.pop(f"step_state_{db}", None)
+                        S.pop(f"step_pending_{db}", None)
+                    st.rerun()
+            with _cc2:
+                if st.button("↺ Cancel step run", use_container_width=True,
+                             key=f"cancel_step_{db}"):
+                    S.pop(f"step_state_{db}", None)
+                    S.pop(f"step_pending_{db}", None)
+                    st.rerun()
+
     else:
         st.caption("Automated mode: all stages run sequentially without stopping.")
 
-    # RUN MATCHING
-    st.markdown("---")
-    can_run = not main_df.empty and not cvi_df.empty
-    if not can_run:
-        st.info("📤 Upload CVI and Main Data above to enable matching.")
+        # RUN MATCHING
+        st.markdown("---")
+        can_run = not main_df.empty and not cvi_df.empty
+        if not can_run:
+            st.info("📤 Upload CVI and Main Data above to enable matching.")
 
-    if st.button(f"▶ RUN MATCHING — {db}", type="primary",
-                 use_container_width=True, key=f"run_{db}",
-                 disabled=not can_run):
-        n = len(main_df)
-        st.info(f"Matching M={n:,} rows × {len(w_keys_cf)} w-columns…")
-        with st.spinner("Matching engine running…"):
-            # Pass the source path (if known). run_matching only uses it when
-            # it is safe — large CSV, DuckDB present, row-count == M, contiguous
-            # n-columns — and falls back to pandas otherwise.
-            res = run_matching(main_df, cvi_df, sc_dict, carry_fwd,
-                               main_path=gs("main_data_path"))
-        st.session_state.setdefault(gkey("results"), {})[db] = res
+        if st.button(f"▶ RUN MATCHING — {db}", type="primary",
+                     use_container_width=True, key=f"run_{db}",
+                     disabled=not can_run):
+            n = len(main_df)
+            st.info(f"Matching M={n:,} rows × {len(w_keys_cf)} w-columns…")
+            with st.spinner("Matching engine running…"):
+                # Pass the source path (if known). run_matching only uses it when
+                # it is safe — large CSV, DuckDB present, row-count == M, contiguous
+                # n-columns — and falls back to pandas otherwise.
+                res = run_matching(main_df, cvi_df, sc_dict, carry_fwd,
+                                   main_path=gs("main_data_path"))
+            st.session_state.setdefault(gkey("results"), {})[db] = res
 
     # ── Display results (persists after run) ──────────────────────────────
     if db in gs("results", {}):

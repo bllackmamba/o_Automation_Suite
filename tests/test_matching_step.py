@@ -271,3 +271,32 @@ class TestAllEmptyCVI:
         assert not result["paused"]
         assert result["selected"].empty
         assert result["fig9_table"].empty
+
+
+# ── Test 5: step result is a superset of run_matching result keys ─────────────
+
+class TestStepSupersetKeys:
+    """
+    The step-driven final result must contain AT LEAST every key that
+    run_matching returns (it may also carry extra step-mode keys).
+    """
+
+    def test_step_result_keys_are_superset_of_run_matching_keys(self):
+        main_df = pd.DataFrame({
+            "n1": [1, 2, 3],
+            "n2": [10, 11, 12],
+        })
+        cvi_df = pd.DataFrame({
+            "w1": [1.0, 2.0, np.nan],
+            "w2": [10.0, np.nan, np.nan],
+        })
+        sc_dict   = {"w1": 1, "w2": 1}
+        carry_fwd = {"w1": "U", "w2": "U"}
+
+        ref_result   = run_matching(main_df, cvi_df, sc_dict, carry_fwd)
+        step_result  = _drive_step(main_df, cvi_df, carry_fwd, [(0, 1), (1, 1)])
+
+        missing = set(ref_result.keys()) - set(step_result.keys())
+        assert not missing, (
+            f"step result is missing keys present in run_matching: {missing}"
+        )
