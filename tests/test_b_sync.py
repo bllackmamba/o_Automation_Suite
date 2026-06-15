@@ -211,20 +211,19 @@ class TestAppendDraws:
 # ── Public API wrappers ───────────────────────────────────────────────────────
 
 class TestPublicAPI:
-    def test_sync_not_configured_for_oz(self):
-        """oz has no b_hist_start → not_configured."""
-        b = _b([("w1", [1, 2, 3, 4, 5, 6, 7])])
-        hist = _hist([(1001, "2026-01-01", [1, 2, 3, 4, 5, 6, 7])])
-        result = sync_b_with_latest_draws("oz", b, hist)
-        assert result["status"] == "not_configured"
-
     def test_append_raises_for_unconfigured_game(self):
+        """Unknown game key has no b_hist_start → raises ValueError."""
         b = _b([("w1", [1, 2, 3, 4, 5, 6, 7])])
         with pytest.raises(ValueError, match="b_hist_start not configured"):
-            append_draws_to_b("oz", b, [{"draw": "1", "date": "", "numbers": [1, 2, 3]}])
+            append_draws_to_b("xx", b, [{"draw": "1", "date": "", "numbers": [1, 2, 3]}])
 
-    def test_sat_b_hist_start_is_43(self):
-        assert GAMES_CFG["sat"]["b_hist_start"] == 43
+    def test_b_hist_start_values(self):
+        """All five games have correct 0-based iloc b_hist_start values."""
+        assert GAMES_CFG["sat"]["b_hist_start"] == 42  # w43 = iloc[42]
+        assert GAMES_CFG["pb"]["b_hist_start"]  == 38  # w39 = iloc[38]
+        assert GAMES_CFG["oz"]["b_hist_start"]  == 42  # w43 = iloc[42]
+        assert GAMES_CFG["sfl"]["b_hist_start"] == 42  # w43 = iloc[42]
+        assert GAMES_CFG["mwf"]["b_hist_start"] == 42  # w43 = iloc[42]
 
 
 # ── Integration: sat "current" check ─────────────────────────────────────────
@@ -266,11 +265,11 @@ def test_sat_current_against_draw_4685():
     Skipped if sat B file is not available on disk.
     """
     b = _load_sat_b()
-    if b.empty or len(b) <= 43:
+    if b.empty or len(b) <= 42:
         pytest.skip("sat B file not available or too short — skipping integration test")
 
-    # Build a synthetic hist_df: draw 4685 is newest (pos 0), matching B row 43
-    b_row_43_nums = sorted(_b_row_nums(b, 43))
+    # Build a synthetic hist_df: draw 4685 is newest (pos 0), matching B row iloc[42] (Excel w43)
+    b_row_43_nums = sorted(_b_row_nums(b, 42))
     hist = pd.DataFrame([
         {"draw": 4685, "date": "2026-06-14", "numbers": str(b_row_43_nums)},
         {"draw": 4684, "date": "2026-06-07", "numbers": "[1, 2, 3, 4, 5, 6]"},  # dummy older

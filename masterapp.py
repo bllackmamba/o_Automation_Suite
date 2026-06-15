@@ -1177,12 +1177,24 @@ def slice_variables(w_mat: pd.DataFrame) -> dict:
 
 
 def append_draw_to_b(b_df: pd.DataFrame, numbers: list,
-                     draw_label: str = "") -> pd.DataFrame:
+                     draw_label: str = "", game: str = None) -> pd.DataFrame:
     """Append a new draw (sorted list of ints) to a B DataFrame.
 
     Handles both row-oriented B (col 'w' = label, pos_1/pos_2/… = numbers)
     and legacy column-oriented B (each column = a w-set).
     Existing rows are NEVER modified.  Returns unchanged b_df if numbers is empty.
+
+    Row-oriented insertion point
+    -----------------------------
+    B is reverse-chronological (newest-first): row index b_hist_start holds the
+    newest draw, increasing row index = older draws (see b_sync.py). If `game`
+    is given and GAMES_CFG[game]["b_hist_start"] is configured, the new draw is
+    inserted at that row (shifting existing rows down) via b_sync._append_draws
+    — the SAME insertion point used by the "🔄 Sync B to latest" button
+    (b_sync.append_draws_to_b), so both paths stay consistent.
+
+    If `game` is not given, or b_hist_start isn't configured for it yet,
+    falls back to the legacy bottom-append.
     """
     if not numbers:
         return b_df
@@ -1201,6 +1213,13 @@ def append_draw_to_b(b_df: pd.DataFrame, numbers: list,
 
     if is_row_oriented:
         label = draw_label or f"w{len(b_df) + 1}"
+        b_hist_start = GAMES_CFG.get(game, {}).get("b_hist_start") if game else None
+        if b_hist_start is not None:
+            # Same insertion point as b_sync.append_draws_to_b (newest-first).
+            draw_dict = {"draw": label, "date": "", "numbers": nums}
+            return _append_draws(b_df, [draw_dict], b_hist_start)
+        # b_hist_start not configured for this game — legacy bottom-append
+        # (old ordering bug, see TODO #5 / b_hist_start config item).
         row = {"w": label}
         row.update({f"pos_{i+1}": n for i, n in enumerate(nums)})
         new_row_df = pd.DataFrame([row])
@@ -4119,8 +4138,15 @@ elif page == "🧩 Variable Inputs":
         # ── 3b: Manual draw entry (fallback) ─────────────────────────────────
         st.markdown("#### ➕ Add draw manually")
         st.caption(
-            "Enter the winning numbers for a new draw. They will be appended to B "
+            "Enter the winning numbers for a new draw. They will be added to B "
             "so the pipeline stays current. Numbers are sorted (w1=smallest) before saving.")
+        if _b_hist_start_cfg is not None:
+            st.caption(f"Inserted at row {_b_hist_start_cfg} (newest-first), "
+                       f"matching B's draw-history ordering — same insertion "
+                       f"point as the Sync button above.")
+        else:
+            st.caption("⚠️ `b_hist_start` not configured for this game — the new "
+                       "draw will be appended at the bottom of B for now.")
 
         _draw_label_in = st.text_input("Draw label / number (optional)", value="",
                                         key="stats_draw_label",
@@ -4138,7 +4164,8 @@ elif page == "🧩 Variable Inputs":
                 else:
                     _b_current = gs("B", pd.DataFrame())
                     _b_updated = append_draw_to_b(_b_current, _new_nums,
-                                                   draw_label=_draw_label_in.strip())
+                                                   draw_label=_draw_label_in.strip(),
+                                                   game=_gkey)
                     gs_set("B", _b_updated)
                     _b_save_path = _gdirs["Base"] / f"B_{_gkey}_updated.csv"
                     _b_updated.to_csv(_b_save_path, index=False)
