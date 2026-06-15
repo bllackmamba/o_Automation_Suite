@@ -26,6 +26,8 @@ __all__ = [
     "_parse_cvi_col", "_count_matches",
     # formatting
     "_count_str", "_breakdown_str",
+    # stage helpers
+    "_compute_stage_present", "_apply_stage_sc",
     # engines
     "run_matching", "_parallel_worker",
 ]
@@ -195,6 +197,183 @@ def _breakdown_str(counts: np.ndarray, sc_set: set,
     )
 
 
+# ── Stage helpers (extracted from run_matching's loop body) ───────────────────
+
+def _compute_stage_present(
+    idx: int,
+    w_cols: list,
+    carry_fwd: dict,
+    prev_sel: pd.DataFrame,
+    prev_unsel: pd.DataFrame,
+    main_df: pd.DataFrame,
+    cvi_df: pd.DataFrame,
+    n_cols: list,
+    M: int,
+) -> dict:
+    """
+    Determine the present pool and CVI match counts for one stage.
+
+    Returns a dict with: w, w_num, direction, present_df, present_label,
+    present_count, raw_cvi, cvi_nums, empty_cvi.
+    When empty_cvi is False, also: pres_counts, pres_count_str.
+    """
+    w     = w_cols[idx]
+    w_num = int(w[1:])
+    direction = carry_fwd.get(w, carry_fwd.get(f"w{w_num}", "U")).upper()
+
+    if idx == 0:
+        present_df    = main_df.copy().reset_index(drop=True)
+        present_label = f"M:{M}"
+    elif direction == "S":
+        present_df    = prev_sel.reset_index(drop=True)
+        present_label = f"S:{len(prev_sel)}"
+    else:
+        present_df    = prev_unsel.reset_index(drop=True)
+        present_label = f"U:{len(prev_unsel)}"
+
+    present_count = len(present_df)
+    if present_label.startswith("U:"):
+        present_label = f"U:{present_count}"
+    elif present_label.startswith("S:") and not present_label.startswith("S:0"):
+        present_label = f"S:{present_count}"
+
+    raw_cvi  = _parse_cvi_col(cvi_df[w])
+    cvi_nums = np.array(raw_cvi, dtype=np.float32)
+
+    if not len(cvi_nums):
+        return {
+            "w": w, "w_num": w_num, "direction": direction,
+            "present_df": present_df, "present_label": present_label,
+            "present_count": present_count,
+            "raw_cvi": raw_cvi, "cvi_nums": cvi_nums,
+            "empty_cvi": True,
+        }
+
+    pres_counts    = _smart_match(present_df, n_cols, cvi_nums)
+    pres_count_str = _count_str(pres_counts)
+
+    return {
+        "w": w, "w_num": w_num, "direction": direction,
+        "present_df": present_df, "present_label": present_label,
+        "present_count": present_count,
+        "raw_cvi": raw_cvi, "cvi_nums": cvi_nums,
+        "empty_cvi": False,
+        "pres_counts": pres_counts, "pres_count_str": pres_count_str,
+    }
+
+
+def _apply_stage_sc(
+    stage_info: dict,
+    sc_set: set,
+    sc_str: str,
+    w: str,
+    w_num: int,
+    M: int,
+    main_df: pd.DataFrame,
+    main_count_map: dict,
+    main_bd_map: dict,
+    main_counts_map: dict,
+    n_cols: list,
+    small_enough: bool,
+) -> dict:
+    """
+    Apply SC selection to the matched stage and build all output rows.
+
+    Returns a dict with: fig9_row, breakdown_row, debug_row,
+    sel_df, unsel_df, new_prev_sel, new_prev_unsel, exhausted.
+    """
+    present_df     = stage_info["present_df"]
+    present_label  = stage_info["present_label"]
+    present_count  = stage_info["present_count"]
+    direction      = stage_info["direction"]
+    raw_cvi        = stage_info["raw_cvi"]
+    pres_counts    = stage_info["pres_counts"]
+    pres_count_str = stage_info["pres_count_str"]
+
+    sel_bd_str, unsel_bd_str, unsel_count_str, count_dist = \
+        _breakdown_str(pres_counts, sc_set)
+
+    sel_mask = np.isin(pres_counts, list(sc_set))
+    sel_df   = present_df[sel_mask].reset_index(drop=True)
+    unsel_df = present_df[~sel_mask].reset_index(drop=True)
+
+    if len(sel_df) + len(unsel_df) != present_count:
+        logging.warning(
+            "[run_matching] %s: sel(%d) + unsel(%d) != present(%d) — row loss in mask",
+            w, len(sel_df), len(unsel_df), present_count,
+        )
+
+    if small_enough and not sel_df.empty:
+        sel_df = sel_df.copy()
+        sel_df["Count"] = pres_counts[sel_mask]
+    if small_enough and not unsel_df.empty:
+        unsel_df = unsel_df.copy()
+        unsel_df["Count"] = pres_counts[~sel_mask]
+
+    fig9_row = {
+        "Row":             f"Row {w_num}",
+        "Main\nData":      f"M:{M}",
+        "CVI":             w,
+        "Dir":             direction,
+        "Main\nCount":     main_count_map[w],
+        "Main\nBreakdown": main_bd_map[w],
+        "Present\nData":   present_label,
+        "Present\nCount":  pres_count_str,
+        "SC":              sc_str,
+        "Selected":        f"S:{len(sel_df)}" if not sel_df.empty else "S:0",
+        "Sel\nBreakdown":  sel_bd_str,
+        "Unsel\nCount":    unsel_count_str,
+        "Unselected":      f"U:{len(unsel_df)}" if not unsel_df.empty else "U:0",
+        "Unsel\nBreakdown":unsel_bd_str,
+    }
+
+    breakdown_row = {**count_dist, "w_col": w}
+
+    main_df_with_count = None
+    if small_enough:
+        mc_arr = main_counts_map.get(w, np.array([], dtype=np.int32))
+        if len(mc_arr) == M:
+            main_df_with_count = main_df.copy()
+            main_df_with_count["Count"] = mc_arr
+
+    debug_row = {
+        "w":              w,
+        "direction":      direction,
+        "cvi_numbers":    raw_cvi,
+        "cvi_set":        set(raw_cvi),
+        "present_in":     present_count,
+        "present_label":  present_label,
+        "sc":             sorted(sc_set),
+        "selected_n":     len(sel_df),
+        "unselected_n":   len(unsel_df),
+        "main_count_str": main_count_map[w],
+        "main_bd_str":    main_bd_map[w],
+        "main_counts":    main_counts_map[w],
+        "pres_count_str": pres_count_str,
+        "count_dist":     count_dist,
+        "note":           "",
+        "sel_df":         sel_df   if small_enough else None,
+        "unsel_df":       unsel_df if small_enough else None,
+        "main_df_wc":     main_df_with_count,
+        "n_cols":         n_cols,
+    }
+
+    new_prev_sel   = sel_df.drop(columns=["Count"], errors="ignore")
+    new_prev_unsel = unsel_df.drop(columns=["Count"], errors="ignore")
+    exhausted      = present_df.empty or (sel_df.empty and unsel_df.empty)
+
+    return {
+        "fig9_row":       fig9_row,
+        "breakdown_row":  breakdown_row,
+        "debug_row":      debug_row,
+        "sel_df":         sel_df,
+        "unsel_df":       unsel_df,
+        "new_prev_sel":   new_prev_sel,
+        "new_prev_unsel": new_prev_unsel,
+        "exhausted":      exhausted,
+    }
+
+
 # ── Sequential matching engine ────────────────────────────────────────────────
 
 def run_matching(main_df: pd.DataFrame,
@@ -341,28 +520,8 @@ def run_matching(main_df: pd.DataFrame,
     final_unsel = prev_unsel.copy()
 
     for idx, w in enumerate(w_cols):
-        w_num     = int(w[1:])
-        direction = carry_fwd.get(w, carry_fwd.get(f"w{w_num}", "U")).upper()
-
-        # ── Determine present_df for this stage ───────────────────────
-        if idx == 0:
-            present_df    = main_df.copy().reset_index(drop=True)
-            present_label = f"M:{M}"
-        elif direction == "S":
-            present_df    = prev_sel.reset_index(drop=True)
-            present_label = f"S:{len(prev_sel)}"
-        else:
-            present_df    = prev_unsel.reset_index(drop=True)
-            present_label = f"U:{len(prev_unsel)}"
-
-        present_count = len(present_df)
-        if present_label.startswith("U:"):
-            present_label = f"U:{present_count}"
-        elif present_label.startswith("S:") and not present_label.startswith("S:0"):
-            present_label = f"S:{present_count}"
-        raw_cvi  = _parse_cvi_col(cvi_df[w])
-        cvi_nums = np.array(raw_cvi, dtype=np.float32)
-        sc_this  = sc_dict.get(w, sc_dict.get(str(w_num), []))
+        w_num   = int(w[1:])
+        sc_this = sc_dict.get(w, sc_dict.get(str(w_num), []))
         if isinstance(sc_this, (int, float)):
             sc_this = [int(sc_this)]
         elif isinstance(sc_this, str):
@@ -371,22 +530,30 @@ def run_matching(main_df: pd.DataFrame,
         sc_set = set(sc_this)
         sc_str = ",".join(str(s) for s in sorted(sc_set)) if sc_set else "—"
 
+        stage_info = _compute_stage_present(
+            idx, w_cols, carry_fwd, prev_sel, prev_unsel,
+            main_df, cvi_df, n_cols, M)
+        direction = stage_info["direction"]
+
         # ── Empty CVI column ──────────────────────────────────────────
-        if not len(cvi_nums):
+        if stage_info["empty_cvi"]:
+            present_df    = stage_info["present_df"]
+            present_label = stage_info["present_label"]
+            present_count = stage_info["present_count"]
             fig9_rows.append({
-                "Row":            f"Row {w_num}",
-                "Main\nData":     f"M:{M}",
-                "CVI":            w,
-                "Dir":            direction,
-                "Main\nCount":    main_count_map[w],
-                "Main\nBreakdown":main_bd_map[w],
-                "Present\nData":  present_label,
-                "Present\nCount": "— No CVI",
-                "SC":             sc_str,
-                "Selected":       "S:0",
-                "Sel\nBreakdown": "—",
-                "Unsel\nCount":   "—",
-                "Unselected":     f"U:{present_count} (fwd)",
+                "Row":             f"Row {w_num}",
+                "Main\nData":      f"M:{M}",
+                "CVI":             w,
+                "Dir":             direction,
+                "Main\nCount":     main_count_map[w],
+                "Main\nBreakdown": main_bd_map[w],
+                "Present\nData":   present_label,
+                "Present\nCount":  "— No CVI",
+                "SC":              sc_str,
+                "Selected":        "S:0",
+                "Sel\nBreakdown":  "—",
+                "Unsel\nCount":    "—",
+                "Unselected":      f"U:{present_count} (fwd)",
                 "Unsel\nBreakdown":"—",
             })
             debug_rows.append({
@@ -410,87 +577,23 @@ def run_matching(main_df: pd.DataFrame,
             final_unsel = present_df.copy()
             continue
 
-        # ── Match present_df against this w-column ────────────────────
-        pres_counts = _smart_match(present_df, n_cols, cvi_nums)
-        sel_bd_str, unsel_bd_str, unsel_count_str, count_dist = \
-            _breakdown_str(pres_counts, sc_set)
-        pres_count_str = _count_str(pres_counts)
+        # ── Apply SC and build output ─────────────────────────────────
+        result = _apply_stage_sc(
+            stage_info, sc_set, sc_str, w, w_num, M,
+            main_df, main_count_map, main_bd_map, main_counts_map,
+            n_cols, small_enough)
 
-        sel_mask = np.isin(pres_counts, list(sc_set))
-        sel_df   = present_df[sel_mask].reset_index(drop=True)
-        unsel_df = present_df[~sel_mask].reset_index(drop=True)
+        fig9_rows.append(result["fig9_row"])
+        breakdown_rows.append(result["breakdown_row"])
+        debug_rows.append(result["debug_row"])
 
-        if len(sel_df) + len(unsel_df) != present_count:
-            logging.warning(
-                "[run_matching] %s: sel(%d) + unsel(%d) != present(%d) — row loss in mask",
-                w, len(sel_df), len(unsel_df), present_count,
-            )
-
-        if small_enough and not sel_df.empty:
-            sel_counts_arr = pres_counts[sel_mask]
-            sel_df = sel_df.copy()
-            sel_df["Count"] = sel_counts_arr
-        if small_enough and not unsel_df.empty:
-            unsel_df = unsel_df.copy()
-            unsel_df["Count"] = pres_counts[~sel_mask]
-
-        fig9_rows.append({
-            "Row":            f"Row {w_num}",
-            "Main\nData":     f"M:{M}",
-            "CVI":            w,
-            "Dir":            direction,
-            "Main\nCount":    main_count_map[w],
-            "Main\nBreakdown":main_bd_map[w],
-            "Present\nData":  present_label,
-            "Present\nCount": pres_count_str,
-            "SC":             sc_str,
-            "Selected":       f"S:{len(sel_df)}" if not sel_df.empty else "S:0",
-            "Sel\nBreakdown": sel_bd_str,
-            "Unsel\nCount":   unsel_count_str,
-            "Unselected":     f"U:{len(unsel_df)}" if not unsel_df.empty else "U:0",
-            "Unsel\nBreakdown":unsel_bd_str,
-        })
-
-        bd = {**count_dist, "w_col": w}
-        breakdown_rows.append(bd)
-
-        main_df_with_count = None
-        if small_enough:
-            mc_arr = main_counts_map.get(w, np.array([], dtype=np.int32))
-            if len(mc_arr) == M:
-                main_df_with_count = main_df.copy()
-                main_df_with_count["Count"] = mc_arr
-
-        debug_rows.append({
-            "w":              w,
-            "direction":      direction,
-            "cvi_numbers":    raw_cvi,
-            "cvi_set":        set(raw_cvi),
-            "present_in":     present_count,
-            "present_label":  present_label,
-            "sc":             sorted(sc_set),
-            "selected_n":     len(sel_df),
-            "unselected_n":   len(unsel_df),
-            "main_count_str": main_count_map[w],
-            "main_bd_str":    main_bd_map[w],
-            "main_counts":    main_counts_map[w],
-            "pres_count_str": pres_count_str,
-            "count_dist":     count_dist,
-            "note":           "",
-            "sel_df":         sel_df   if small_enough else None,
-            "unsel_df":       unsel_df if small_enough else None,
-            "main_df_wc":     main_df_with_count,
-            "n_cols":         n_cols,
-        })
-
-        # ── Carry forward: store both pools for next stage ────────────
-        prev_sel   = sel_df.drop(columns=["Count"], errors="ignore")
-        prev_unsel = unsel_df.drop(columns=["Count"], errors="ignore")
-        final_sel   = sel_df
-        final_unsel = unsel_df
+        prev_sel    = result["new_prev_sel"]
+        prev_unsel  = result["new_prev_unsel"]
+        final_sel   = result["sel_df"]
+        final_unsel = result["unsel_df"]
 
         # ── If present exhausted, fill remaining rows ─────────────────
-        if present_df.empty or (sel_df.empty and unsel_df.empty):
+        if result["exhausted"]:
             for rw in w_cols[idx + 1:]:
                 rw_num = int(rw[1:])
                 fig9_rows.append({
