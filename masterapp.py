@@ -4960,6 +4960,64 @@ elif page == "🖥️ Container Dashboards":
             _stage_i = _pending["awaiting_sc_for_stage"]
             _cd      = _pending["count_dist"]
 
+            # ── All-stages preview table ────────────────────────────────
+            _rs        = S[f"step_state_{db}"]
+            _AWAIT     = "— (awaiting SC)"
+            _COL_ORDER = [
+                "Row", "Main\nData", "CVI", "Dir",
+                "Main\nCount", "Main\nBreakdown",
+                "Present\nData", "Present\nCount",
+                "SC", "Selected", "Sel\nBreakdown",
+                "Unsel\nCount", "Unselected", "Unsel\nBreakdown",
+            ]
+            _preview_rows = []
+            for _pi, _pw in enumerate(_rs["w_cols"]):
+                _pw_num = int(_pw[1:])
+                if _pi < _rs["stage_idx"]:
+                    _preview_rows.append(_rs["fig9_rows"][_pi])
+                elif _pi == _rs["stage_idx"]:
+                    _preview_rows.append({
+                        "Row":             f"Row {_pw_num}",
+                        "Main\nData":      f"M:{_rs['M']}",
+                        "CVI":             _pw,
+                        "Dir":             _rs["carry_fwd"].get(_pw, "U"),
+                        "Main\nCount":     _rs["main_count_map"].get(_pw, "—"),
+                        "Main\nBreakdown": _rs["main_bd_map"].get(_pw, "—"),
+                        "Present\nData":   _rs["cached_stage_info"]["present_label"],
+                        "Present\nCount":  ",".join(
+                            str(int(k[1:])) for k in sorted(_cd)
+                        ),
+                        "SC":              _AWAIT,
+                        "Selected":        _AWAIT,
+                        "Sel\nBreakdown":  _AWAIT,
+                        "Unsel\nCount":    _AWAIT,
+                        "Unselected":      _AWAIT,
+                        "Unsel\nBreakdown":_AWAIT,
+                    })
+                else:
+                    _preview_rows.append({
+                        "Row":             f"Row {_pw_num}",
+                        "Main\nData":      f"M:{_rs['M']}",
+                        "CVI":             _pw,
+                        "Dir":             _rs["carry_fwd"].get(_pw, "U"),
+                        "Main\nCount":     _rs["main_count_map"].get(_pw, "—"),
+                        "Main\nBreakdown": _rs["main_bd_map"].get(_pw, "—"),
+                        "Present\nData":   "—",
+                        "Present\nCount":  "—",
+                        "SC":              "—",
+                        "Selected":        "—",
+                        "Sel\nBreakdown":  "—",
+                        "Unsel\nCount":    "—",
+                        "Unselected":      "—",
+                        "Unsel\nBreakdown":"—",
+                    })
+            show_paginated_df(
+                pd.DataFrame(_preview_rows)[_COL_ORDER],
+                key=f"step_preview_{db}_{_stage_i}",
+                use_container_width=True, hide_index=True,
+            )
+            st.markdown("---")
+
             st.write(f"**Paused at {_stage_w}** — choose SC for this stage")
 
             if _cd:
