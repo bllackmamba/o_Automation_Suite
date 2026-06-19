@@ -248,6 +248,15 @@ SCRAPE_HEADERS = {
 }
 
 
+# ── Number value-range colour helper ──────────────────────────────────────────
+def _num_colour(n: int) -> tuple:
+    """Return (bg_hex, fg_hex) for a lottery number based on its value, not its SL."""
+    if n <= 9:   return ("#FFFF00", "#000")
+    if n <= 19:  return ("#00B0F0", "#000")
+    if n <= 29:  return ("#A0A0A0", "#000")
+    if n <= 40:  return ("#92D050", "#000")
+    return               ("#FF69B4", "#fff")
+
 
 # ── Naming convention helpers ──────────────────────────────────────────────
 def parse_main_filename(fname: str) -> dict:
@@ -2831,15 +2840,13 @@ elif page == "🧩 Variable Inputs":
                 '<div class="info">'
                 'Numbers are arranged in their <b>present order</b>: '
                 'sorted by how many draws ago they last appeared. '
-                'Colour bands match the Since Last brackets used by Rainbow. '
-                'Numbers with the same Since Last value share one row/band.<br>'
+                'Each number is colour-coded by its <b>value range</b>.<br>'
                 '<b>Legend:</b> '
-                '<span style="background:#FFD700;color:#000;padding:1px 6px;border-radius:3px">■ Last Draw (0)</span> '
-                '<span style="background:#FFFF55;color:#000;padding:1px 6px;border-radius:3px">■ Very Recent (1–3)</span> '
-                '<span style="background:#92D050;color:#000;padding:1px 6px;border-radius:3px">■ Recent (4–9)</span> '
-                '<span style="background:#00B0F0;color:#000;padding:1px 6px;border-radius:3px">■ Moderate (10–19)</span> '
-                '<span style="background:#CC44FF;color:#fff;padding:1px 6px;border-radius:3px">■ Old (20–29)</span> '
-                '<span style="background:#FF69B4;color:#fff;padding:1px 6px;border-radius:3px">■ Very Old (30+)</span>'
+                '<span style="background:#FFFF00;color:#000;padding:1px 6px;border-radius:3px">■ 1–9</span> '
+                '<span style="background:#00B0F0;color:#000;padding:1px 6px;border-radius:3px">■ 10–19</span> '
+                '<span style="background:#A0A0A0;color:#000;padding:1px 6px;border-radius:3px">■ 20–29</span> '
+                '<span style="background:#92D050;color:#000;padding:1px 6px;border-radius:3px">■ 30–40</span> '
+                '<span style="background:#FF69B4;color:#fff;padding:1px 6px;border-radius:3px">■ 41–49</span>'
                 '</div>',
                 unsafe_allow_html=True)
 
@@ -2909,12 +2916,15 @@ elif page == "🧩 Variable Inputs":
                             _nums_in_grp = _po_groups[_psl_val]
                             _bg, _fg = _po_color(_psl_val)
                             _grp_lbl = _po_label(_psl_val)
-                            _cells = "".join(
-                                f"<span style='display:inline-block;background:{_bg};"
-                                f"color:{_fg};border-radius:4px;padding:2px 7px;"
-                                f"margin:2px 3px;font-weight:600;min-width:28px;"
-                                f"text-align:center'>{_pn}</span>"
-                                for _pn in _nums_in_grp)
+                            _cells = []
+                            for _pn in _nums_in_grp:
+                                _nb, _nf = _num_colour(_pn)
+                                _cells.append(
+                                    f"<span style='display:inline-block;background:{_nb};"
+                                    f"color:{_nf};border-radius:4px;padding:2px 7px;"
+                                    f"margin:2px 3px;font-weight:600;min-width:28px;"
+                                    f"text-align:center'>{_pn}</span>")
+                            _cells = "".join(_cells)
                             _html_rows.append(
                                 f"<tr>"
                                 f"<td style='padding:4px 8px;text-align:center;"
@@ -2934,7 +2944,6 @@ elif page == "🧩 Variable Inputs":
                         _po_rows = []
                         for _rank, _pn in enumerate(_po_wt, 1):
                             _psl = _po_sl.get(_pn, 0)
-                            _bg, _fg = _po_color(_psl)
                             _po_rows.append({
                                 "Rank":       _rank,
                                 "Number":     _pn,
@@ -2950,8 +2959,7 @@ elif page == "🧩 Variable Inputs":
                         # Coloured summary strip
                         _strip_parts = []
                         for _rank, _pn in enumerate(_po_wt, 1):
-                            _psl = _po_sl.get(_pn, 0)
-                            _bg, _fg = _po_color(_psl)
+                            _bg, _fg = _num_colour(_pn)
                             _strip_parts.append(
                                 f"<span style='display:inline-block;background:{_bg};"
                                 f"color:{_fg};border-radius:4px;padding:2px 7px;"
@@ -2974,7 +2982,7 @@ elif page == "🧩 Variable Inputs":
                             st.markdown(
                                 '<div class="info">Each column below is one Rainbow combination. '
                                 'Numbers are shown in <b>present order</b> (most recent → oldest) '
-                                'and colour-coded by Since Last bracket. '
+                                'and colour-coded by number value range. '
                                 'Red outline = number appears in this combo.</div>',
                                 unsafe_allow_html=True)
 
@@ -3016,7 +3024,7 @@ elif page == "🧩 Variable Inputs":
                             _body_parts = [_hdr]
                             for _rank, _pn in enumerate(_po_wt, 1):
                                 _psl = _po_sl.get(_pn, 0)
-                                _bg, _fg = _po_color(_psl)
+                                _bg, _fg = _num_colour(_pn)
                                 _row_html = (
                                     f"<tr>"
                                     f"<td style='padding:2px 5px;text-align:center;"
@@ -3843,12 +3851,11 @@ elif page == "🧩 Variable Inputs":
                 sl_display = pd.DataFrame([
                     {"Rank": i+1, "Number": num,
                      "Since_Last": sl_dict.get(num, "?"),
-                     "Group": ("🔴 Last Draw" if sl_dict.get(num,99)==0
-                               else "🟠 Very Recent" if sl_dict.get(num,99)<=3
-                               else "🟡 Recent" if sl_dict.get(num,99)<=9
-                               else "🟢 Moderate" if sl_dict.get(num,99)<=19
-                               else "🔵 Old" if sl_dict.get(num,99)<=29
-                               else "⚫ Very Old")}
+                     "Group": ("🟡 1–9" if num <= 9
+                               else "🔵 10–19" if num <= 19
+                               else "⬜ 20–29" if num <= 29
+                               else "🟢 30–40" if num <= 40
+                               else "🩷 41–49")}
                     for i, num in enumerate(all_wt)
                 ])
                 show_paginated_df(sl_display, key="sl_display_tbl", use_container_width=True)
