@@ -6,12 +6,15 @@ Tests:
   _to_w_rows       — B path, D path, R path, Sp regression (12/112 bug)
 """
 
+import warnings
+
 import pytest
 import pandas as pd
 
 import syndicate_core.pipeline as _pipeline_mod
 from syndicate_core.pipeline import split_d_by_game
 from syndicate_core.collation import _to_w_rows
+from syndicate_core.generators import generate_rainbow
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -269,3 +272,83 @@ def test_to_w_rows_ep_preserves_nan_not_zero():
     # Second value column for b_ab must be NaN, not 0
     if len(val_cols) >= 2:
         assert pd.isna(row_b.iloc[2]), "NaN must be preserved, not replaced with 0"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# _to_w_rows — R row-oriented path  (combo col + integer position cols)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_to_w_rows_r_row_oriented():
+    """R row-oriented format: combo → Set_Label; integer-named cols → data."""
+    r_df = pd.DataFrame({
+        "combo": ["(1, 2)", "(3,)"],
+        "w":     ["w1",    "w2"],
+        0:       [1,       3],
+        1:       [2,       pd.NA],
+    })
+    result = _to_w_rows(r_df)
+
+    assert "Set_Label" in result.columns
+    assert list(result["Set_Label"]) == ["(1, 2)", "(3,)"]
+    assert len(result) == 2
+    # First row has two numbers
+    val_cols = [c for c in result.columns if c != "Set_Label"]
+    assert result.iloc[0, 1] == 1
+    # Second row: second position is NaN (dropna(how="all") keeps it since col 0 is not NaN)
+    assert result.iloc[1, 1] == 3
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# generate_rainbow — row-oriented output and no-cap behaviour
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _make_sl_df():
+    """Minimal Since-Last DataFrame: 3 groups, 3 numbers."""
+    return pd.DataFrame({
+        "numbers":    [1, 2, 3],
+        "Since Last": [0, 1, 2],
+        "to_keep":    [1, 2, 3],
+    })
+
+
+def test_generate_rainbow_row_oriented_output():
+    """generate_rainbow returns row-oriented DataFrame with combo, w, and integer cols."""
+    sl_df = _make_sl_df()
+    result_df, wt_df, info = generate_rainbow(sl_df, max_comb=2)
+
+    # Must have combo and w columns
+    assert "combo" in result_df.columns, "Missing 'combo' column"
+    assert "w" in result_df.columns, "Missing 'w' column"
+
+    # Integer position columns must be present
+    int_cols = [c for c in result_df.columns if isinstance(c, int)]
+    assert len(int_cols) >= 1, "No integer position columns"
+
+    # Row count matches n_combos in info
+    assert info["n_combos"] == len(result_df)
+
+    # w labels are sequential: w1, w2, …
+    w_vals = result_df["w"].tolist()
+    assert w_vals == [f"w{i+1}" for i in range(len(result_df))]
+
+    # Rows with more numbers sort first (fewest NaN first by row)
+    n_vals = result_df[int_cols].notna().sum(axis=1).tolist()
+    assert n_vals == sorted(n_vals, reverse=True), "Rows not sorted by number count"
+
+    # capped is always False
+    assert info["capped"] is False
+
+
+def test_generate_rainbow_no_cap():
+    """combo_guard triggers a warning but never reduces the combo count."""
+    sl_df = _make_sl_df()
+    # With 3 groups, max_comb=2 → C(3,1)+C(3,2) = 3+3 = 6 combos.
+    # Set combo_guard=3 so the warning fires, but output stays at 6.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result_df, _, info = generate_rainbow(sl_df, max_comb=2, combo_guard=3)
+
+    assert len(result_df) == 6, f"Expected 6 combos, got {len(result_df)}"
+    assert info["capped"] is False
+    assert any("combo_guard" in str(w.message) for w in caught), \
+        "Expected a combo_guard warning"

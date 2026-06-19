@@ -223,29 +223,59 @@ def _wt_writer(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def generate_rainbow(sl_df: pd.DataFrame, max_comb=None, combo_guard: int = 5_000):
-    """R from the Since-Last table. Returns (result_df, wt_df, info). Safe-max guard
-    auto-lowers max_comb until the combo-count fits — no 2**K explosion."""
+    """R from the Since-Last table. Returns (result_df, wt_df, info).
+
+    max_comb defaults to r_max_comb from GAMES_CFG, which equals the game's
+    pick size (6, 7, or 8). Do not pass values larger than pick — there is no
+    mathematical benefit to combining more SL groups than balls drawn.
+    combo_guard emits a warning when the expected combo count exceeds it but
+    never reduces max_comb — the caller is responsible for bounding output.
+    result_df is row-oriented: columns = ["combo", "w", 0, 1, 2, …] where
+    combo is the tuple string, w is the sequential label, and 0/1/2/… are
+    the number positions (NaN for shorter combos).
+    """
+    import warnings as _warnings
     df = _normalise_sl(sl_df)
     grouped = df.groupby("since_last")["numbers"].apply(list).to_dict()
     to_keep = set(df["to_keep"].dropna().tolist())
     keys = sorted(grouped.keys())
     n = len(keys)
     requested = n if max_comb is None else max(1, min(int(max_comb), n))
-    capped = False
-    while requested > 1 and _combo_count(n, requested) > combo_guard:
-        requested -= 1
-        capped = True
+    expected = _combo_count(n, requested)
+    if expected > combo_guard:
+        _warnings.warn(
+            f"generate_rainbow: {expected:,} combos exceeds combo_guard={combo_guard:,}. "
+            "Proceeding — pass max_comb to limit output.",
+            stacklevel=2,
+        )
     result = {}
     for comb in _bounded_combos(keys, requested):
         ref = []
         for g in comb:
             ref += grouped[g]
         result[str(comb)] = [e for e in ref if e in to_keep]
-    result_df = pd.DataFrame({k: pd.Series(v, dtype="Int64") for k, v in result.items()})
-    if not result_df.empty:
-        result_df = result_df[result_df.isna().sum().sort_values(kind="stable").index]
+    # Build row-oriented DataFrame: one row per combo, integer position columns.
+    if not result:
+        result_df = pd.DataFrame(columns=["combo", "w"])
+    else:
+        rows = []
+        for combo_str, nums in result.items():
+            row: dict = {"combo": combo_str}
+            row.update({j: v for j, v in enumerate(nums)})
+            rows.append(row)
+        result_df = pd.DataFrame(rows)
+        int_cols = [c for c in result_df.columns if isinstance(c, int)]
+        for col in int_cols:
+            result_df[col] = pd.array(result_df[col], dtype="Int64")
+        # Sort: more numbers first (mirrors previous fewest-NaN column sort).
+        result_df["_n"] = result_df[int_cols].notna().sum(axis=1)
+        result_df = (result_df
+                     .sort_values("_n", ascending=False, kind="stable")
+                     .drop(columns="_n")
+                     .reset_index(drop=True))
+        result_df.insert(1, "w", [f"w{i+1}" for i in range(len(result_df))])
     info = {"n_groups": n, "max_comb": requested,
-            "n_combos": result_df.shape[1], "capped": capped, "combo_guard": combo_guard}
+            "n_combos": len(result_df), "capped": False, "combo_guard": combo_guard}
     return result_df, _wt_writer(df), info
 
 

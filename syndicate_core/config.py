@@ -339,6 +339,7 @@ GAMES_CFG = {
         "b_file": "Base_pb.xlsx", "b_sheet": "B_pb",
         "b_sheet_legacy": "w values Pb A (2)", "thelott_key": "pb",
         "lotto_type": "pb",
+        "r_max_comb": 7,            # = pick size (7 main numbers; powerball excluded)
         # Structural rows w1-w38; draw history starts at Excel row 39 = iloc[38].
         # Confirmed: iloc[38]=w39=[4,5,9,16,17,29,33]=draw#1283(2020-12-17).
         # File is stale by ~286 draws as of 2026-06-11. Only main 7 numbers stored; powerball excluded.
@@ -351,6 +352,7 @@ GAMES_CFG = {
         "b_file": "Base_oz.xlsx", "b_sheet": "B_oz",
         "b_sheet_legacy": "oz (2)", "thelott_key": "oz",
         "lotto_type": "oz",
+        "r_max_comb": 7,            # = pick size
         # Structural rows w1-w42; draw history starts at Excel row 43 = iloc[42].
         # Confirmed: iloc[42]=w43=[2,9,14,19,28,29,44]=draw#1404(2021-01-12).
         # File is stale by ~282 draws as of 2026-06-09.
@@ -366,6 +368,7 @@ GAMES_CFG = {
         "b_file": "Base_sat.xlsx", "b_sheet": "B_sat",
         "b_sheet_legacy": "Ta (2)", "thelott_key": "sat",
         "lotto_type": "Sat",
+        "r_max_comb": 6,            # = pick size
         # Structural rows w1-w42; draw history starts at Excel row 43 = iloc[42].
         # Confirmed: iloc[42]=w43=[12,16,30,31,40,43]=draw#4685(2026-06-13).
         # Corrected from 43→42: b_hist_start is 0-based (pandas iloc), not 1-based Excel row.
@@ -378,6 +381,7 @@ GAMES_CFG = {
         "b_file": "Base_sfl.xlsx", "b_sheet": "B_sfl",
         "b_sheet_legacy": "sfl", "thelott_key": "sfl",
         "lotto_type": "sfl",
+        "r_max_comb": 7,            # = pick size
         # Structural rows w1-w42; draw history section (w43+) is currently empty.
         # _sync_b returns gap_too_large ("b_hist_start=42 but B has only 42 rows")
         # until real draws are populated at w43 onwards.
@@ -393,6 +397,7 @@ GAMES_CFG = {
         "b_file": "Base_mwf.xlsx", "b_sheet": "B_mwf",      # own file+sheet; was colliding via "Ta (2)"
         "b_sheet_legacy": "Ta (2)", "thelott_key": "mwf",
         "lotto_type": "Mon",
+        "r_max_comb": 6,            # = pick size
         # Structural rows w1-w42; draw history section (w43+) is currently empty.
         # _sync_b returns gap_too_large ("b_hist_start=42 but B has only 42 rows")
         # until real draws are populated at w43 onwards.

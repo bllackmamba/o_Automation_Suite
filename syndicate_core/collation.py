@@ -52,8 +52,19 @@ def _to_w_rows(df: pd.DataFrame, is_direct: bool = False,
                         if str(c).strip().lower() == "w"), None)
     is_b_style  = w_label_col is not None and len(pos_cols) > 0
     has_ep_style = "sub_label" in df.columns and "pair" in df.columns
+    has_r_style  = "combo" in df.columns
 
-    if not force_column_oriented and has_ep_style:
+    if not force_column_oriented and has_r_style:
+        # R row-oriented: combo = Set_Label; integer-named cols = data positions.
+        int_cols = [c for c in df.columns
+                    if isinstance(c, int)
+                    or (isinstance(c, str) and re.match(r'^\d+$', c))]
+        label = df["combo"].reset_index(drop=True)
+        sub   = df[int_cols].reset_index(drop=True)
+        out   = sub.copy()
+        out.insert(0, "Set_Label", label)
+
+    elif not force_column_oriented and has_ep_style:
         # Ep row-oriented: sub_label = Set_Label; integer-named cols = data positions.
         int_cols = [c for c in df.columns
                     if isinstance(c, int)

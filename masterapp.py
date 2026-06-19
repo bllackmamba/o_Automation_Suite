@@ -2769,12 +2769,15 @@ elif page == "🧩 Variable Inputs":
                              f"`{all_wt[:15]}...`")
 
                     _n_groups = len(set(int(v) + 1 for v in since_last_dict.values()))
-                    manual_max = None
-                    if st.checkbox("Set max groups manually (else auto safe-max)",
+                    _cfg_max = GAMES_CFG[_gkey].get("r_max_comb")
+                    _pick    = GAMES_CFG[_gkey].get("pick", _cfg_max or _n_groups)
+                    manual_max = _cfg_max   # default from per-game config (= pick size)
+                    if st.checkbox(f"Override max groups (game default = {_pick})",
                                    key="r_manual"):
+                        _slider_default = min(int(_pick), _n_groups)
                         manual_max = st.slider("Max Since Last groups to combine:",
-                                               1, max(2, _n_groups), min(3, _n_groups),
-                                               key="r_max_comb")
+                                               1, max(2, _n_groups), _slider_default,
+                                               key="r_max_comb_slider")
                     if st.button("▶ Generate Rainbow (R)", key="gen_R",
                                  type="primary", use_container_width=True):
                         try:
@@ -2793,11 +2796,10 @@ elif page == "🧩 Variable Inputs":
                             gs_set("_R_wt", r_wt)
                             r_path = _gdirs["Rainbow"] / f"R_{_gkey}.csv"
                             r_df.to_csv(r_path, index=False)
-                            _cap = " (auto-capped to stay safe)" if r_info["capped"] else ""
                             st.markdown(
                                 f'<div class="ok">✅ R generated: {r_info["n_combos"]} combos '
                                 f'from {r_info["n_groups"]} groups · max_comb={r_info["max_comb"]}'
-                                f'{_cap} → {r_path.name}</div>', unsafe_allow_html=True)
+                                f' → {r_path.name}</div>', unsafe_allow_html=True)
                             show_paginated_df(r_df, key="r_generated_view",
                                              use_container_width=True)
                         except Exception as ex:
@@ -2817,20 +2819,20 @@ elif page == "🧩 Variable Inputs":
                 show_paginated_df(gs("R", pd.DataFrame()), key="r_current_memory",
                                   use_container_width=True, height=200)
 
-                with st.expander("R — transposed preview (as used in collation)", expanded=False):
-                    _r_t = _to_w_rows(gs("R", pd.DataFrame()), force_column_oriented=True)
+                with st.expander("R — collation preview", expanded=False):
+                    _r_t = _to_w_rows(gs("R", pd.DataFrame()))
                     if not _r_t.empty:
                         _r_t_val = [c for c in _r_t.columns if c != "Set_Label"]
                         _r_t = _r_t.rename(
                             columns={c: f"w{i+1}" for i, c in enumerate(_r_t_val)})
                         st.caption(
                             f"{len(_r_t)} rows · each row = one combo tuple; "
-                            f"Set_Label = original R column name; "
+                            f"Set_Label = combo tuple string; "
                             f"w1…w{len(_r_t_val)} = the numbers in that combo")
                         show_paginated_df(_r_t, key="r_transposed_preview",
                                           use_container_width=True, height=300)
                     else:
-                        st.info("Transposed view is empty — R may not be column-oriented.")
+                        st.info("Collation preview is empty — R may not be loaded.")
 
         # ══ inner sub-tab 1 : Present Order ═══════════════════════════════
         with _r_inner[1]:
@@ -2985,25 +2987,29 @@ elif page == "🧩 Variable Inputs":
                                 'Red outline = number appears in this combo.</div>',
                                 unsafe_allow_html=True)
 
-                            # R is column-oriented: each column is one combo, rows are numbers in it
-                            _r_all_combos = list(_r_mem.columns)
+                            # R is row-oriented: "combo" col = label, integer cols = numbers
+                            _r_all_combos = _r_mem["combo"].tolist() if "combo" in _r_mem.columns else []
+                            _r_int_cols = [c for c in _r_mem.columns
+                                           if isinstance(c, int)
+                                           or (isinstance(c, str) and str(c).isdigit())]
                             _max_combos_disp = st.slider(
                                 "Number of Rainbow combos to display:",
                                 1, min(len(_r_all_combos), 50), min(len(_r_all_combos), 20),
                                 key="po_n_combos")
-                            _display_combos = _r_all_combos[:_max_combos_disp]
 
                             # Build HTML table: rows = present-order rank, cols = combo
                             _combo_sets = []
-                            for _col in _display_combos:
+                            for _, _rrow in _r_mem.head(_max_combos_disp).iterrows():
                                 _cset = set()
-                                for _v in _r_mem[_col].dropna():
-                                    try:
-                                        _v = int(_v)
-                                        if _v >= 1:
-                                            _cset.add(_v)
-                                    except Exception:
-                                        pass
+                                for _c in _r_int_cols:
+                                    _v = _rrow[_c]
+                                    if pd.notna(_v):
+                                        try:
+                                            _iv = int(_v)
+                                            if _iv >= 1:
+                                                _cset.add(_iv)
+                                        except Exception:
+                                            pass
                                 _combo_sets.append(_cset)
 
                             _hdr = ("<table style='border-collapse:collapse;"
