@@ -265,7 +265,7 @@ def generate_splits(d_input_df: pd.DataFrame, splitter=None) -> pd.DataFrame:
     comb3 = list(combinations(keys, 3))
     comb2 = list(combinations(keys, 2))
     let_3, fin_3 = ["e", "f", "g", "h"], ["o", "p", "q", "r"]
-    let_2, fin_2 = ["i", "j", "k", "l", "m", "n"], ["s", "t", "u", "v", "w", "x"]
+    let_2, fin_2 = ["i", "j", "k", "l", "m", "n"], ["s", "t", "u", "v", "z", "x"]
     comb3dict, comb2dict, result = {}, {}, {}
     universe = {e for k in keys for e in sets_ready[k]}
     for j, comb in enumerate(comb3):

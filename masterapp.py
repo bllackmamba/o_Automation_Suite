@@ -2986,21 +2986,19 @@ elif page == "🧩 Variable Inputs":
                                 'Red outline = number appears in this combo.</div>',
                                 unsafe_allow_html=True)
 
-                            # Collect all number sets per Rainbow combo column
-                            _r_wcols = [c for c in _r_mem.columns
-                                        if str(c).startswith("w")]
+                            # R is column-oriented: each column is one combo, rows are numbers in it
+                            _r_all_combos = list(_r_mem.columns)
                             _max_combos_disp = st.slider(
                                 "Number of Rainbow combos to display:",
-                                1, min(len(_r_mem), 50), min(len(_r_mem), 20),
+                                1, min(len(_r_all_combos), 50), min(len(_r_all_combos), 20),
                                 key="po_n_combos")
-                            _r_slice = _r_mem.head(_max_combos_disp)
+                            _display_combos = _r_all_combos[:_max_combos_disp]
 
                             # Build HTML table: rows = present-order rank, cols = combo
                             _combo_sets = []
-                            for _, _crow in _r_slice.iterrows():
+                            for _col in _display_combos:
                                 _cset = set()
-                                for _wc in _r_wcols:
-                                    _v = _crow.get(_wc)
+                                for _v in _r_mem[_col].dropna():
                                     try:
                                         _v = int(_v)
                                         if _v >= 1:
