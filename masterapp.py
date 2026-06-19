@@ -626,16 +626,17 @@ def _load_sets_file(path: Path) -> pd.DataFrame:
     """Load a Sp / So / Ep CSV saved row-oriented (via _sets_df_to_rows) and
     restore it to column-oriented format expected by S['Sp'] / S['So'] / S['Ep'].
 
-    If the file has a 'set' column (row-oriented), applies _rows_to_sets_df to
-    transpose back to column-oriented.  Falls back to plain _load_file for legacy
-    column-oriented files.  R files are never passed here — they stay column-oriented.
+    Handles both the legacy 'set' column and the current 'Set_Label' column.
+    Falls back to plain _load_file for legacy column-oriented files.
+    R files are never passed here — they stay column-oriented.
     """
     df = _load_file(path, numeric=False)
     if df.empty:
         return df
-    if "set" in df.columns:
+    set_col = next((c for c in ("Set_Label", "set") if c in df.columns), None)
+    if set_col:
         # Row-oriented on disk — transpose back to column-oriented for in-memory use
-        return _rows_to_sets_df(df, set_col="set")
+        return _rows_to_sets_df(df, set_col=set_col)
     return df
 
 

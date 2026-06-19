@@ -33,20 +33,23 @@ def _sets_df_to_rows(df: pd.DataFrame, set_col: str = "set") -> pd.DataFrame:
 
     Input:  columns = set names (e.g. 'ab', 'U', 'w10', 'a_ab'),
             rows    = values padded with NaN to equal length.
-    Output: one row per set; first column = set_col (the set label);
-            remaining columns = pos_1, pos_2, … (the actual numbers).
-    Empty/all-NaN value columns are dropped.
+    Output: one row per set; columns = ['Set_Label', 'w', 0, 1, 2, …] where
+            Set_Label is the original column name, w is a sequential label
+            (w1, w2, …), and the integer columns hold the actual numbers.
+    Empty/all-NaN rows are dropped.
     """
     if df is None or df.empty:
         return pd.DataFrame()
     t = df.T.reset_index()
-    t.columns = [set_col] + [f"pos_{i+1}" for i in range(t.shape[1] - 1)]
-    # Drop value columns that are entirely NaN
-    val_cols = [c for c in t.columns if c != set_col]
+    n_val = t.shape[1] - 1
+    t.columns = ["Set_Label"] + list(range(n_val))
+    # Drop rows that are entirely NaN
+    val_cols = list(range(n_val))
     t = t.dropna(subset=val_cols, how="all")
     # Drop trailing all-NaN position columns
     non_empty_val = [c for c in val_cols if t[c].notna().any()]
-    t = t[[set_col] + non_empty_val].reset_index(drop=True)
+    t = t[["Set_Label"] + non_empty_val].reset_index(drop=True)
+    t.insert(1, "w", [f"w{i+1}" for i in range(len(t))])
     return t
 
 
@@ -54,7 +57,8 @@ def _rows_to_sets_df(df: pd.DataFrame, set_col: str = "set") -> pd.DataFrame:
     """Inverse of _sets_df_to_rows: transpose row-oriented sets → column-oriented.
 
     Input:  one row per set; first column = set name (set_col);
-            remaining columns = pos_1, pos_2, … (the actual numbers).
+            optional second column 'w' (sequential label — skipped);
+            remaining columns hold the actual numbers.
     Output: columns = set names; rows = values padded with NaN.
     Used to read row-oriented input files back into the column-oriented format
     that Ep / Sp / So generators expect.
@@ -62,7 +66,7 @@ def _rows_to_sets_df(df: pd.DataFrame, set_col: str = "set") -> pd.DataFrame:
     """
     if df is None or df.empty:
         return pd.DataFrame()
-    val_cols = [c for c in df.columns if c != set_col]
+    val_cols = [c for c in df.columns if c not in (set_col, "w")]
     if set_col in df.columns:
         labels = df[set_col].astype(str).tolist()
         data   = df[val_cols].values
