@@ -51,8 +51,19 @@ def _to_w_rows(df: pd.DataFrame, is_direct: bool = False,
     w_label_col = next((c for c in df.columns
                         if str(c).strip().lower() == "w"), None)
     is_b_style  = w_label_col is not None and len(pos_cols) > 0
+    has_ep_style = "sub_label" in df.columns and "pair" in df.columns
 
-    if not force_column_oriented and is_b_style:
+    if not force_column_oriented and has_ep_style:
+        # Ep row-oriented: sub_label = Set_Label; integer-named cols = data positions.
+        int_cols = [c for c in df.columns
+                    if isinstance(c, int)
+                    or (isinstance(c, str) and re.match(r'^\d+$', c))]
+        label = df["sub_label"].reset_index(drop=True)
+        sub   = df[int_cols].reset_index(drop=True)
+        out   = sub.copy()
+        out.insert(0, "Set_Label", label)
+
+    elif not force_column_oriented and is_b_style:
         # B path: row-oriented — "w" column = Set_Label, pos_N columns = data.
         # Drop pos columns that are entirely NaN (trailing empty positions).
         live_pos = [c for c in pos_cols if df[c].notna().any()]

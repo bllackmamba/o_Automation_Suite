@@ -226,3 +226,46 @@ def test_to_w_rows_sp_all_columns_become_rows():
         f"the pre-filter bug has re-appeared."
     )
     assert set(result["Set_Label"]) == set(all_cols)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# _to_w_rows — Ep path  (row-oriented: pair + w + sub_label + integer pos cols)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_to_w_rows_ep_row_oriented():
+    """Ep row-oriented format: sub_label → Set_Label; integer-named cols → data."""
+    ep_df = pd.DataFrame({
+        "pair":      ["ab", "ab", "ac"],
+        "w":         ["w1", "w2", "w3"],
+        "sub_label": ["a_ab", "b_ab", "a_ac"],
+        0:           [12, 16, 30],
+        1:           [16, 30, pd.NA],
+        2:           [pd.NA, pd.NA, pd.NA],
+    })
+    result = _to_w_rows(ep_df)
+
+    assert "Set_Label" in result.columns
+    assert list(result["Set_Label"]) == ["a_ab", "b_ab", "a_ac"]
+    # Integer position columns become the data; all-NaN col 2 dropped by dropna
+    val_cols = [c for c in result.columns if c != "Set_Label"]
+    assert len(val_cols) >= 1
+    # First data value for row 0 should be 12
+    assert result.iloc[0, 1] == 12
+
+
+def test_to_w_rows_ep_preserves_nan_not_zero():
+    """NaN cells in shorter Ep rows must survive as NaN, never be replaced by 0."""
+    ep_df = pd.DataFrame({
+        "pair":      ["ab", "ab"],
+        "w":         ["w1", "w2"],
+        "sub_label": ["a_ab", "b_ab"],
+        0:           [12,    16],
+        1:           [16,    pd.NA],  # b_ab has only one number
+    })
+    result = _to_w_rows(ep_df)
+
+    row_b = result[result["Set_Label"] == "b_ab"].iloc[0]
+    val_cols = [c for c in result.columns if c != "Set_Label"]
+    # Second value column for b_ab must be NaN, not 0
+    if len(val_cols) >= 2:
+        assert pd.isna(row_b.iloc[2]), "NaN must be preserved, not replaced with 0"

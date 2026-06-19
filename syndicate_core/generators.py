@@ -405,7 +405,16 @@ def generate_excelpro(objects: dict, wt_list) -> pd.DataFrame:
         result["b_" + h] = [w for w in wt if w in xt]
         result["c_" + h] = [w for w in wt if w in yo]
         result["d_" + h] = [w for w in wt if w in yt]
-    return pd.DataFrame({k: pd.Series(v, dtype="Int64") for k, v in result.items()})
+    ep_df = pd.DataFrame({k: pd.Series(v, dtype="Int64") for k, v in result.items()})
+    if ep_df.empty:
+        return ep_df
+    # Transpose to row-oriented: each role_pair (a_ab, …) becomes one row.
+    t = ep_df.T.reset_index()
+    t = t.rename(columns={t.columns[0]: "sub_label"})
+    t.insert(0, "pair", t["sub_label"].str.split("_", n=1).str[1])
+    t.insert(1, "w", [f"w{i+1}" for i in range(len(t))])
+    # Remaining columns are already named 0, 1, 2, … (original RangeIndex positions).
+    return t
 
 
 # ── Auto-wire: run generators immediately after D loads ───────────────────────
@@ -465,8 +474,8 @@ def _auto_wire_generators(gdirs: dict, gk: str):
                 if not ep_df.empty:
                     st.session_state[f"Ep__{gk}"] = ep_df
                     ep_path = gdirs["ExcelPro"] / f"Ep_{gk}.csv"
-                    _sets_df_to_rows(ep_df, set_col="set").to_csv(ep_path, index=False)
-                    msgs.append(f"Ep ({ep_df.shape[1]} cols)")
+                    ep_df.to_csv(ep_path, index=False)
+                    msgs.append(f"Ep ({len(ep_df)} rows)")
         except Exception as _ep_ex:
             msgs.append(f"Ep error: {_ep_ex}")
 

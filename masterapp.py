@@ -2485,11 +2485,10 @@ elif page == "🔄 CVI Matrix":
                             if not _ep_df.empty:
                                 gs_set("Ep", _ep_df)
                                 _ep_path = _gdirs["ExcelPro"] / f"Ep_{_gkey}.csv"
-                                _sets_df_to_rows(_ep_df, set_col="set").to_csv(
-                                    _ep_path, index=False)
-                                st.markdown(f"**Ep — {_ep_df.shape[1]} ExcelPro sets**")
+                                _ep_df.to_csv(_ep_path, index=False)
+                                st.markdown(f"**Ep — {len(_ep_df)} ExcelPro sets**")
                                 show_paginated_df(
-                                    _sets_df_to_rows(_ep_df, set_col="set"),
+                                    _ep_df,
                                     key="cvi_slice_ep", use_container_width=True, height=200)
                     else:
                         st.info("ℹ️ Ep skipped — load R (Rainbow) first to supply the wt list, "
@@ -3409,9 +3408,9 @@ elif page == "🧩 Variable Inputs":
                     _ep_df   = generate_excelpro(_ep_objs, wt_list_ep)
                     gs_set("Ep", _ep_df)
                     _ep_path = _gdirs["ExcelPro"] / f"Ep_{_gkey}.csv"
-                    _sets_df_to_rows(_ep_df, set_col="set").to_csv(_ep_path, index=False)
+                    _ep_df.to_csv(_ep_path, index=False)
                     st.markdown(
-                        f'<div class="ok">✅ Ep: {_ep_df.shape[1]} cols → '
+                        f'<div class="ok">✅ Ep: {len(_ep_df)} rows → '
                         f'{_ep_path.name}</div>',
                         unsafe_allow_html=True)
                 except Exception as _ep_ex:
@@ -3420,22 +3419,18 @@ elif page == "🧩 Variable Inputs":
         ep_df_view = gs("Ep", pd.DataFrame())
         if not ep_df_view.empty:
             st.markdown("**Ep output — row-oriented (one row per set):**")
-            show_paginated_df(_sets_df_to_rows(ep_df_view, set_col="set"), key="ep_rows_view", use_container_width=True)
+            show_paginated_df(ep_df_view, key="ep_rows_view", use_container_width=True)
 
             try:
                 import io as _ep_io
                 _ep_buf = _ep_io.BytesIO()
                 with pd.ExcelWriter(_ep_buf, engine="openpyxl") as _ep_xl:
-                    _sets_df_to_rows(ep_df_view, set_col="set").to_excel(
-                        _ep_xl, sheet_name="All", index=False)
+                    ep_df_view.to_excel(_ep_xl, sheet_name="All", index=False)
                     from itertools import combinations as _ep_combos2
                     for _p in ["".join(p) for p in _ep_combos2(["a","b","c","d"], 2)]:
-                        _pcols = [c for c in ep_df_view.columns if c.endswith("_" + _p)]
-                        if _pcols:
-                            _pb = ep_df_view[_pcols].copy()
-                            _pb.columns = [c.split("_")[0] for c in _pcols]
-                            _sets_df_to_rows(_pb, set_col="obj").to_excel(
-                                _ep_xl, sheet_name=_p, index=False)
+                        _pb = ep_df_view[ep_df_view["pair"] == _p].copy()
+                        if not _pb.empty:
+                            _pb.to_excel(_ep_xl, sheet_name=_p, index=False)
                 _ep_buf.seek(0)
                 st.download_button(
                     label=f"⬇ Download Ep_{_gkey}.xlsx  (All + ab ac ad bc bd cd)",
