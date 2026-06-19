@@ -4371,6 +4371,10 @@ elif page == "🖥️ Container Dashboards":
     all_main_files = scan_main_data_files()
     all_cvi_files  = scan_cvi_files()
 
+    _lotto_keys = list(LOTTO_TYPES.keys())
+    _default_lotto = _gcfg.get("lotto_type", _lotto_keys[0])
+    _default_lotto_idx = _lotto_keys.index(_default_lotto) if _default_lotto in _lotto_keys else 0
+
     p1,p2,p3,p4 = st.columns(4)
     with p1:
         st.metric("Next Cluster ID", next_id)
@@ -4380,7 +4384,8 @@ elif page == "🖥️ Container Dashboards":
                                       help="e.g. 1n, Draw1567, May28")
     with p3:
         lotto_sel = st.selectbox("Lotto type:",
-                                 list(LOTTO_TYPES.keys()),
+                                 _lotto_keys,
+                                 index=_default_lotto_idx,
                                  format_func=lambda x: f"{x} — {LOTTO_TYPES[x]}",
                                  key="par_lotto")
     with p4:
@@ -4893,7 +4898,8 @@ elif page == "🖥️ Container Dashboards":
     with ind_cl2:
         ind_lotto = st.selectbox(
             "Lotto type:",
-            list(LOTTO_TYPES.keys()),
+            _lotto_keys,
+            index=_default_lotto_idx,
             format_func=lambda x: f"{x}",
             key=f"ind_lotto_{db}"
         )
