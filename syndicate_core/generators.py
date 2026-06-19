@@ -28,7 +28,7 @@ __all__ = [
 
 # ── Row / column transpose helpers ────────────────────────────────────────────
 
-def _sets_df_to_rows(df: pd.DataFrame, set_col: str = "set") -> pd.DataFrame:
+def _sets_df_to_rows(df: pd.DataFrame) -> pd.DataFrame:
     """Transpose a column-oriented set DataFrame to row-oriented for display/export.
 
     Input:  columns = set names (e.g. 'ab', 'U', 'w10', 'a_ab'),
@@ -475,7 +475,7 @@ def _auto_wire_generators(gdirs: dict, gk: str):
             if not sp_df.empty:
                 st.session_state[f"Sp__{gk}"] = sp_df
                 sp_path = gdirs["Splits"] / f"Sp_{gk}.csv"
-                _sets_df_to_rows(sp_df, set_col="set").to_csv(sp_path, index=False)
+                _sets_df_to_rows(sp_df).to_csv(sp_path, index=False)
                 msgs.append(f"Sp ({sp_df.shape[1]} cols)")
     except Exception as _sp_ex:
         msgs.append(f"Sp error: {_sp_ex}")
@@ -488,7 +488,7 @@ def _auto_wire_generators(gdirs: dict, gk: str):
             if not so_df.empty:
                 st.session_state[f"So__{gk}"] = so_df
                 so_path = gdirs["Splits_Combi"] / f"So_{gk}.csv"
-                _sets_df_to_rows(so_df, set_col="set").to_csv(so_path, index=False)
+                _sets_df_to_rows(so_df).to_csv(so_path, index=False)
                 msgs.append(f"So ({so_df.shape[1]} cols)")
     except Exception as _so_ex:
         msgs.append(f"So error: {_so_ex}")

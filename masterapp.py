@@ -2457,10 +2457,10 @@ elif page == "🔄 CVI Matrix":
                     if not _sp_df.empty:
                         gs_set("Sp", _sp_df)
                         _sp_path = _gdirs["Splits"] / f"Sp_{_gkey}.csv"
-                        _sets_df_to_rows(_sp_df, set_col="set").to_csv(_sp_path, index=False)
+                        _sets_df_to_rows(_sp_df).to_csv(_sp_path, index=False)
                         st.markdown(f"**Sp — {_sp_df.shape[1]} split-combination sets**")
                         show_paginated_df(
-                            _sets_df_to_rows(_sp_df, set_col="set"),
+                            _sets_df_to_rows(_sp_df),
                             key="cvi_slice_sp", use_container_width=True, height=200)
 
                     # So
@@ -2468,10 +2468,10 @@ elif page == "🔄 CVI Matrix":
                     if not _so_df.empty:
                         gs_set("So", _so_df)
                         _so_path = _gdirs["Splits_Combi"] / f"So_{_gkey}.csv"
-                        _sets_df_to_rows(_so_df, set_col="set").to_csv(_so_path, index=False)
+                        _sets_df_to_rows(_so_df).to_csv(_so_path, index=False)
                         st.markdown(f"**So — {_so_df.shape[1]} union-combination sets**")
                         show_paginated_df(
-                            _sets_df_to_rows(_so_df, set_col="set"),
+                            _sets_df_to_rows(_so_df),
                             key="cvi_slice_so", use_container_width=True, height=200)
 
                     # Ep — needs R's wt list; skip silently if R not yet loaded
@@ -3547,7 +3547,7 @@ elif page == "🧩 Variable Inputs":
                         sp_df = sp_df[order_sp]
                         gs_set("Sp", sp_df)
                         sp_path = _gdirs["Splits"] / f"Sp_{_gkey}.csv"
-                        _sets_df_to_rows(sp_df, set_col="set").to_csv(sp_path, index=False)
+                        _sets_df_to_rows(sp_df).to_csv(sp_path, index=False)
                         st.markdown(
                             f'<div class="ok">✅ Sp generated: {sp_df.shape[1]} columns '
                             f'→ {sp_path.name}</div>',
@@ -3561,7 +3561,7 @@ elif page == "🧩 Variable Inputs":
         sp_view = gs("Sp", pd.DataFrame())
         if not sp_view.empty:
             st.markdown("**Current Sp in memory (row-oriented — one row per set):**")
-            show_paginated_df(_sets_df_to_rows(sp_view, set_col="set"), key="sp_current_memory", use_container_width=True)
+            show_paginated_df(_sets_df_to_rows(sp_view), key="sp_current_memory", use_container_width=True)
 
             # ── Excel export: row-oriented, one sheet per group ──────────
             st.markdown("#### Download as Excel (one sheet per set group, row-oriented)")
@@ -3570,7 +3570,7 @@ elif page == "🧩 Variable Inputs":
                 _sp_buf = _sp_io.BytesIO()
                 with pd.ExcelWriter(_sp_buf, engine="openpyxl") as _sp_writer:
                     # Sheet "All" — full row-oriented table
-                    _sets_df_to_rows(sp_view, set_col="set").to_excel(
+                    _sets_df_to_rows(sp_view).to_excel(
                         _sp_writer, sheet_name="All", index=False)
                     # Group columns by prefix, then export each group row-oriented
                     _sp_groups = {
@@ -3585,7 +3585,7 @@ elif page == "🧩 Variable Inputs":
                     }
                     for _sheet, _cols in _sp_groups.items():
                         if _cols:
-                            _sets_df_to_rows(sp_view[_cols], set_col="set").to_excel(
+                            _sets_df_to_rows(sp_view[_cols]).to_excel(
                                 _sp_writer, sheet_name=_sheet, index=False)
                 _sp_buf.seek(0)
                 st.download_button(
@@ -3704,7 +3704,7 @@ elif page == "🧩 Variable Inputs":
                         so_df = so_df[order_so]
                         gs_set("So", so_df)
                         so_path = _gdirs["Splits_Combi"] / f"So_{_gkey}.csv"
-                        _sets_df_to_rows(so_df, set_col="set").to_csv(so_path, index=False)
+                        _sets_df_to_rows(so_df).to_csv(so_path, index=False)
                         st.markdown(
                             f'<div class="ok">✅ So generated: {so_df.shape[1]} columns '
                             f'→ {so_path.name}</div>',
@@ -3720,7 +3720,7 @@ elif page == "🧩 Variable Inputs":
         so_view = gs("So", pd.DataFrame())
         if not so_view.empty:
             st.markdown("**Current So in memory (row-oriented — one row per set):**")
-            show_paginated_df(_sets_df_to_rows(so_view, set_col="set"), key="so_current_memory", use_container_width=True)
+            show_paginated_df(_sets_df_to_rows(so_view), key="so_current_memory", use_container_width=True)
 
             # ── Excel export: row-oriented, one sheet per combination type
             st.markdown("#### Download as Excel (one sheet per combination type, row-oriented)")
@@ -3750,14 +3750,14 @@ elif page == "🧩 Variable Inputs":
 
                 with pd.ExcelWriter(_so_buf, engine="openpyxl") as _so_writer:
                     # Sheet "All" — full row-oriented table
-                    _sets_df_to_rows(so_view, set_col="set").to_excel(
+                    _sets_df_to_rows(so_view).to_excel(
                         _so_writer, sheet_name="All", index=False)
                     _sheet_order = ["Universe", "Triples", "Triple_minus_pair",
                                     "U_minus_triple_pair", "Pairs", "U_minus_pair"]
                     for _sh in _sheet_order:
                         _cols = _so_groups.get(_sh, [])
                         if _cols:
-                            _sets_df_to_rows(so_view[_cols], set_col="set").to_excel(
+                            _sets_df_to_rows(so_view[_cols]).to_excel(
                                 _so_writer, sheet_name=_sh[:31], index=False)
 
                 _so_buf.seek(0)
