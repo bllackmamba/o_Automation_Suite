@@ -4439,9 +4439,42 @@ elif page == "📦 Container Formula":
         S["cf_active"][row["Name"]] = row["Active"]
 
     st.markdown("---")
-    active_names = [r[1] for r in CF_ROWS if S["cf_active"].get(r[1],True)]
-    chosen_f = st.selectbox("Collate formula:", active_names)
-    comps = COMP_MAP.get(chosen_f, [])
+    active_names = [r[1] for r in CF_ROWS if S["cf_active"].get(r[1], True)]
+
+    # ── Formula input: free-text + quick-pick hint buttons ────────────────
+    _CF_KNOWN_VARS = {"B", "R", "D", "Ep", "Sp", "So"}
+    if "cf_formula_str" not in S:
+        S["cf_formula_str"] = "BRD"
+
+    st.caption("Quick-pick predefined formulas:")
+    _hint_row_size = 9
+    _hint_batches = [active_names[i:i + _hint_row_size]
+                     for i in range(0, len(active_names), _hint_row_size)]
+    for _hbatch in _hint_batches:
+        _hcols = st.columns(len(_hbatch))
+        for _hi, _hn in enumerate(_hbatch):
+            with _hcols[_hi]:
+                if st.button(_hn, key=f"cf_hint_{_hn}", use_container_width=True):
+                    S["cf_formula_str"] = _hn
+
+    chosen_f_raw = st.text_input(
+        "Or type any formula — tokens B R D Ep Sp So, separated by + / space / comma:",
+        key="cf_formula_str",
+        placeholder="e.g.  BRD  ·  B+R+D  ·  BRDEpSoSp  ·  Sp+So",
+    )
+
+    _cf_tokens = [t for t in re.split(r"[+\s,]+", chosen_f_raw.strip()) if t]
+    _cf_invalid = [t for t in _cf_tokens
+                   if re.sub(r"\d+$", "", t) not in _CF_KNOWN_VARS]
+    if not _cf_tokens:
+        st.info("Type a formula or click a quick-pick button above.")
+        st.stop()
+    if _cf_invalid:
+        st.error(f"Unknown variable(s): {_cf_invalid}. Accepted: {sorted(_CF_KNOWN_VARS)}")
+        st.stop()
+
+    comps = _cf_tokens
+    chosen_f = "".join(_cf_tokens)
     st.write(f"**Components:** {' + '.join(comps)}")
     # Resolve to base variables (strip trailing digits, de-dup) — must match
     # execute_collation, so D1D2D3 checks for D (not D1/D2/D3), B1B2B3 → B, etc.
