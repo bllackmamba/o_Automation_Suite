@@ -497,33 +497,39 @@ def _init_state():
     # gkey("B") == "B__sat" at startup (active_game() defaults to "sat").
     if "S" in st.session_state and gkey("B") in st.session_state:
         return
-    # Auto-load B for the default game (sat) at startup.
-    # The active game can change via the game selector; B will reload in the B tab.
-    _b_init = _auto_load_b("sat")
-    _sat_dirs = game_dirs("sat")
+
+    _boot_gk   = st.session_state.get("active_game", "sat")
+    _boot_dirs = game_dirs(_boot_gk)
+
+    # B — auto-load with legacy fallback
+    _b_init = _auto_load_b(_boot_gk)
     if _b_init.empty:
-        _b_init = _load_file(_sat_dirs["Base"] / "B.xlsx")   # legacy fallback
+        _b_init = _load_file(_boot_dirs["Base"] / f"Base_{_boot_gk}.xlsx")
 
     # Unscoped infrastructure — lives in the S dict as before.
     st.session_state.S = {
         "cf_active":         {r[1]: True for r in CF_ROWS},
-        "auto":              {},
+        "auto":              {"_global": "Auto"},
         "confirmed_api_url": "",
         "cookie_str":        "",
         "scrape_log":        [],
         "container_status":  {},
     }
-    # Game-scoped DataFrames — stored directly in st.session_state via gs_set().
-    # Only the default game (sat) is pre-loaded; other games populate on demand.
+    # Game-scoped DataFrames — load fresh from canonical disk files, no per-key guards.
     gs_set("B",              _b_init)
-    gs_set("R",              pd.DataFrame())
-    gs_set("D",              _load_file(_sat_dirs["Direct"]       / "D.xlsx"))
-    gs_set("Sp",             _load_sets_file(_sat_dirs["Splits"]       / "data_1b.xlsx"))
-    gs_set("So",             _load_sets_file(_sat_dirs["Splits_Combi"] / "data.xlsx"))
     gs_set("main_data",      pd.DataFrame())
     gs_set("main_data_path", "")
     gs_set("cvi",            {})
     gs_set("results",        {})
+    _boot_vars = [
+        (f"R__{_boot_gk}",  _boot_dirs["Rainbow"]        / f"R_{_boot_gk}.csv",  _load_file),
+        (f"D__{_boot_gk}",  _boot_dirs["Games_Breakdown"] / f"D_ALL_{_boot_gk}.csv", _load_file),
+        (f"Sp__{_boot_gk}", _boot_dirs["Splits"]          / f"Sp_{_boot_gk}.csv", _load_sets_file),
+        (f"So__{_boot_gk}", _boot_dirs["Splits_Combi"]    / f"So_{_boot_gk}.csv", _load_sets_file),
+        (f"Ep__{_boot_gk}", _boot_dirs["ExcelPro"]        / f"Ep_{_boot_gk}.csv", _load_file),
+    ]
+    for _bk, _bp, _bl in _boot_vars:
+        st.session_state[_bk] = _bl(_bp) if _bp.exists() else pd.DataFrame()
     # Init container status
     for db in DASHBOARDS:
         st.session_state.S["container_status"][db] = pd.DataFrame({
