@@ -824,6 +824,17 @@ def _read_uploaded(f, **kw) -> "pd.DataFrame":
     raise ValueError(f"Could not parse uploaded file: {f.name}")
 
 
+def _w_strip_display(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a display-only copy with the 'w' prefix stripped from positional columns.
+
+    w1 → 1, w2 → 2, … (integer labels matching the Sp/So on-disk format).
+    Never modifies the caller's DataFrame.
+    """
+    disp = df.copy()
+    rename = {c: int(c[1:]) for c in disp.columns if re.match(r'^w\d+$', str(c))}
+    return disp.rename(columns=rename) if rename else disp
+
+
 def execute_collation(components: list[str]) -> pd.DataFrame:
     """
     Build a formula's CVI by STACKING each variable's w-sets as ROWS (vertically)
@@ -4458,7 +4469,7 @@ elif page == "📦 Container Formula":
                     f'{_n_rows:,} row{"s" if _n_rows!=1 else ""} '
                     f'(showing first {_preview_n})</div>',
                     unsafe_allow_html=True)
-                show_paginated_df(_piece, key=f"cf_piece_preview_{_pi}", use_container_width=True)
+                show_paginated_df(_w_strip_display(_piece), key=f"cf_piece_preview_{_pi}", use_container_width=True)
                 if _pi < len(_demo_pieces) - 1:
                     _next_var = _demo_pieces[_pi+1]["Source"].iloc[0]
                     st.markdown(
@@ -4499,7 +4510,7 @@ elif page == "📦 Container Formula":
 
             n_show_c = min(60, result.shape[1])
             st.caption(f"Result — {result.shape[0]:,} rows (full matrix saved to disk):")
-            show_paginated_df(result.iloc[:, :n_show_c], key="cf_result_view", use_container_width=True)
+            show_paginated_df(_w_strip_display(result.iloc[:, :n_show_c]), key="cf_result_view", use_container_width=True)
             st.download_button(f"⬇ CVI_{chosen_f}.csv", to_csv_bytes(result),
                                f"CVI_{chosen_f}.csv","text/csv")
 
@@ -4507,7 +4518,7 @@ elif page == "📦 Container Formula":
         with st.expander("📋 All collated CVIs in memory"):
             for fname, df in gs("cvi", {}).items():
                 st.markdown(f"**{fname}** — {len(df)} rows × {len(df.columns)} cols")
-                show_paginated_df(df, key=f"cvi_mem_expander_{fname}", use_container_width=True)
+                show_paginated_df(_w_strip_display(df), key=f"cvi_mem_expander_{fname}", use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE: CONTAINER DASHBOARDS
@@ -4758,8 +4769,32 @@ elif page == "🖥️ Container Dashboards":
             st.success(f"✅ **CVI** — {len(w_cols_prev)} w-columns × "
                        f"{len(cvi_df)} rows")
             with st.expander("Preview CVI"):
-                show_paginated_df(cvi_df, key="cd_cvi_preview_auto", use_container_width=True,
-                             hide_index=True, height=220)
+                _cvi_prev = _w_strip_display(cvi_df)
+                # Recover Set_Label / Source when disk-load nuked them with numeric coercion.
+                # Only the 2 text columns are re-read — fast even for large CVI files.
+                if ("Set_Label" in _cvi_prev.columns
+                        and _cvi_prev["Set_Label"].isna().all()):
+                    _cvi_meta_files = (
+                        sorted(_gdirs["CVI"].glob(f"CVI_*{formula_name}*.csv"))
+                        or sorted(_gdirs["CVI"].glob(f"CVI_{formula_name}.csv")))
+                    if _cvi_meta_files:
+                        try:
+                            _meta = pd.read_csv(
+                                _cvi_meta_files[0],
+                                usecols=lambda c: c in ("Source", "Set_Label"),
+                                dtype=str)
+                            if "Set_Label" in _meta.columns:
+                                _cvi_prev["Set_Label"] = (
+                                    _meta["Set_Label"].values[:len(_cvi_prev)])
+                            if ("Source" in _meta.columns
+                                    and "Source" in _cvi_prev.columns):
+                                _cvi_prev["Source"] = (
+                                    _meta["Source"].values[:len(_cvi_prev)])
+                        except Exception:
+                            pass
+                show_paginated_df(_cvi_prev, key="cd_cvi_preview_auto",
+                                  use_container_width=True,
+                                  hide_index=True, height=220)
         else:
             st.warning("⚠️ CVI not loaded")
 
