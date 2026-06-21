@@ -3226,10 +3226,12 @@ elif page == "🧩 Variable Inputs":
                                     f"<span style='font-size:.6rem;font-weight:400'>"
                                     f"SL={_sl_val}</span></span></td>")
                             else:
-                                # Above threshold: empty cell — visually disappears
+                                # Above threshold: blank cell, same height as filled
                                 _sd_html.append(
-                                    "<td style='padding:0;border-bottom:"
-                                    "1px solid rgba(255,255,255,.04)'></td>")
+                                    "<td style='padding:2px 5px;text-align:center'>"
+                                    "<span style='display:inline-block;min-width:32px;"
+                                    "padding:1px 4px;line-height:1.3;"
+                                    "min-height:2em'>&nbsp;</span></td>")
                         _sd_html.append("</tr>")
 
                     _sd_html.append("</tbody></table></div>")
