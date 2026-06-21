@@ -4799,30 +4799,7 @@ elif page == "🖥️ Container Dashboards":
             st.success(f"✅ **CVI** — {len(w_cols_prev)} w-columns × "
                        f"{len(cvi_df)} rows")
             with st.expander("Preview CVI"):
-                _cvi_prev = _w_strip_display(cvi_df)
-                # Recover Set_Label / Source when disk-load nuked them with numeric coercion.
-                # Only the 2 text columns are re-read — fast even for large CVI files.
-                if ("Set_Label" in _cvi_prev.columns
-                        and _cvi_prev["Set_Label"].isna().all()):
-                    _cvi_meta_files = (
-                        sorted(_gdirs["CVI"].glob(f"CVI_*{formula_name}*.csv"))
-                        or sorted(_gdirs["CVI"].glob(f"CVI_{formula_name}.csv")))
-                    if _cvi_meta_files:
-                        try:
-                            _meta = pd.read_csv(
-                                _cvi_meta_files[0],
-                                usecols=lambda c: c in ("Source", "Set_Label"),
-                                dtype=str)
-                            if "Set_Label" in _meta.columns:
-                                _cvi_prev["Set_Label"] = (
-                                    _meta["Set_Label"].values[:len(_cvi_prev)])
-                            if ("Source" in _meta.columns
-                                    and "Source" in _cvi_prev.columns):
-                                _cvi_prev["Source"] = (
-                                    _meta["Source"].values[:len(_cvi_prev)])
-                        except Exception:
-                            pass
-                show_paginated_df(_cvi_prev, key="cd_cvi_preview_auto",
+                show_paginated_df(_cvi_display(cvi_df), key="cd_cvi_preview_auto",
                                   use_container_width=True,
                                   hide_index=True, height=220)
         else:
