@@ -2152,11 +2152,22 @@ for _i, _gk in enumerate(GAME_KEYS):
             use_container_width=True,
         ):
             st.session_state["active_game"] = _gk
-            # Auto-reload B for the newly selected game so it's available
-            # immediately (before the user clicks the B tab).
+            _sw_dirs = game_dirs(_gk)
+            # B — always reload fresh from disk on game switch
             _b_new = _auto_load_b(_gk)
-            if not _b_new.empty:
-                st.session_state[f"B__{_gk}"] = _b_new
+            st.session_state[f"B__{_gk}"] = _b_new if not _b_new.empty else pd.DataFrame()
+            # R, D, Sp, So, Ep — unconditional fresh reload from canonical disk files
+            _sw_vars = [
+                (f"R__{_gk}",  _sw_dirs["Rainbow"]       / f"R_{_gk}.csv",  _load_file),
+                (f"D__{_gk}",  _sw_dirs["Games_Breakdown"]/ f"D_ALL_{_gk}.csv", _load_file),
+                (f"Sp__{_gk}", _sw_dirs["Splits"]         / f"Sp_{_gk}.csv", _load_sets_file),
+                (f"So__{_gk}", _sw_dirs["Splits_Combi"]   / f"So_{_gk}.csv", _load_sets_file),
+                (f"Ep__{_gk}", _sw_dirs["ExcelPro"]       / f"Ep_{_gk}.csv", _load_file),
+            ]
+            for _sw_key, _sw_path, _sw_loader in _sw_vars:
+                st.session_state[_sw_key] = (
+                    _sw_loader(_sw_path) if _sw_path.exists() else pd.DataFrame()
+                )
             st.rerun()
 
 _gcfg  = active_game_cfg()
@@ -4463,7 +4474,7 @@ elif page == "📦 Container Formula":
         placeholder="e.g.  BRD  ·  B+R+D  ·  BRDEpSoSp  ·  Sp+So",
     )
 
-    _cf_tokens = [t for t in re.split(r"[+\s,]+", chosen_f_raw.strip()) if t]
+    _cf_tokens = [t for t in re.split(r"[+\s,/]+", chosen_f_raw.strip()) if t]
     _cf_invalid = [t for t in _cf_tokens
                    if re.sub(r"\d+$", "", t) not in _CF_KNOWN_VARS]
     if not _cf_tokens:
