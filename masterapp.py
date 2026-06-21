@@ -835,6 +835,26 @@ def _w_strip_display(df: pd.DataFrame) -> pd.DataFrame:
     return disp.rename(columns=rename) if rename else disp
 
 
+def _cvi_display(df: pd.DataFrame) -> pd.DataFrame:
+    """Display-only copy: strip w-prefix from positional columns and fill all-NaN Set_Label.
+
+    When Set_Label is entirely missing (e.g. D blocks without syndicate_id, or
+    numeric-coerced disk loads), falls back to Source_N sequential labels so
+    every row has a human-readable identifier.  Never modifies the caller's DataFrame.
+    """
+    disp = _w_strip_display(df)
+    if ("Set_Label" in disp.columns
+            and disp["Set_Label"].isna().all()
+            and "Source" in disp.columns):
+        counts: dict = {}
+        labels = []
+        for src in disp["Source"].fillna("?"):
+            counts[src] = counts.get(src, 0) + 1
+            labels.append(f"{src}_{counts[src]}")
+        disp["Set_Label"] = labels
+    return disp
+
+
 def execute_collation(components: list[str]) -> pd.DataFrame:
     """
     Build a formula's CVI by STACKING each variable's w-sets as ROWS (vertically)
@@ -4481,7 +4501,7 @@ elif page == "📦 Container Formula":
                     f'{_n_rows:,} row{"s" if _n_rows!=1 else ""} '
                     f'(showing first {_preview_n})</div>',
                     unsafe_allow_html=True)
-                show_paginated_df(_w_strip_display(_piece), key=f"cf_piece_preview_{_pi}", use_container_width=True)
+                show_paginated_df(_cvi_display(_piece), key=f"cf_piece_preview_{_pi}", use_container_width=True)
                 if _pi < len(_demo_pieces) - 1:
                     _next_var = _demo_pieces[_pi+1]["Source"].iloc[0]
                     st.markdown(
@@ -4522,7 +4542,7 @@ elif page == "📦 Container Formula":
 
             n_show_c = min(60, result.shape[1])
             st.caption(f"Result — {result.shape[0]:,} rows (full matrix saved to disk):")
-            show_paginated_df(_w_strip_display(result.iloc[:, :n_show_c]), key="cf_result_view", use_container_width=True)
+            show_paginated_df(_cvi_display(result.iloc[:, :n_show_c]), key="cf_result_view", use_container_width=True)
             st.download_button(f"⬇ CVI_{chosen_f}.csv", to_csv_bytes(result),
                                f"CVI_{chosen_f}.csv","text/csv")
 
@@ -4530,7 +4550,7 @@ elif page == "📦 Container Formula":
         with st.expander("📋 All collated CVIs in memory"):
             for fname, df in gs("cvi", {}).items():
                 st.markdown(f"**{fname}** — {len(df)} rows × {len(df.columns)} cols")
-                show_paginated_df(_w_strip_display(df), key=f"cvi_mem_expander_{fname}", use_container_width=True)
+                show_paginated_df(_cvi_display(df), key=f"cvi_mem_expander_{fname}", use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE: CONTAINER DASHBOARDS
