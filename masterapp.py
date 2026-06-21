@@ -3162,13 +3162,18 @@ elif page == "🧩 Variable Inputs":
                     ordered = sorted(range(1, pool + 1), key=lambda n: (sl[n], n))
                     return ordered, sl
 
-                # Pre-compute present orders for each requested draw
+                # Pre-compute present orders for each requested draw.
+                # threshold = number of distinct SL-group values for that draw
+                # (mirrors the n_groups logic in R generation).  Only numbers
+                # with SL ≤ threshold render as coloured; the rest are empty,
+                # creating the natural staircase taper the user wants to see.
                 _sd_draws_data = []
                 for _di in range(min(_sd_n, len(_sd_rows))):
                     _ord, _sld = _sd_present_order(_di, _sd_rows, _sd_pool)
+                    _sd_thresh  = len(set(_sld.values()))
                     _sd_draws_data.append((_sd_rows[_di]["draw"],
                                            _sd_rows[_di]["date"],
-                                           _ord, _sld))
+                                           _ord, _sld, _sd_thresh))
 
                 if not _sd_draws_data:
                     st.info("Not enough draw history to display.")
@@ -3182,7 +3187,7 @@ elif page == "🧩 Variable Inputs":
                         "<th style='background:#222;color:#aaa;padding:3px 6px;"
                         "text-align:center;white-space:nowrap;min-width:36px'>Rank</th>",
                     ]
-                    for _dl, _date, _ord, _sld in _sd_draws_data:
+                    for _dl, _date, _ord, _sld, _thr in _sd_draws_data:
                         _sd_html.append(
                             f"<th style='background:#222;color:#ccc;padding:3px 8px;"
                             f"text-align:center;white-space:nowrap;min-width:54px'>"
@@ -3197,21 +3202,28 @@ elif page == "🧩 Variable Inputs":
                             f"<tr style='background:{_row_bg}'>"
                             f"<td style='padding:2px 4px;text-align:center;"
                             f"color:#555;font-size:.7rem'>{_rank + 1}</td>")
-                        for _dl, _date, _ord, _sld in _sd_draws_data:
+                        for _dl, _date, _ord, _sld, _thr in _sd_draws_data:
                             _num    = _ord[_rank]
-                            _bg, _fg = _num_colour(_num)
                             _sl_val = _sld.get(_num, 0)
-                            _outline = ("border:2px solid #f00;"
-                                        if _num in _sd_r_nums
-                                        else "border:1px solid rgba(0,0,0,.15);")
-                            _sd_html.append(
-                                f"<td style='padding:2px 5px;text-align:center'>"
-                                f"<span style='display:inline-block;background:{_bg};"
-                                f"color:{_fg};{_outline}border-radius:3px;"
-                                f"min-width:32px;padding:1px 4px;font-weight:600;"
-                                f"line-height:1.3'>{_num}<br>"
-                                f"<span style='font-size:.6rem;font-weight:400'>"
-                                f"SL={_sl_val}</span></span></td>")
+                            if _sl_val <= _thr:
+                                # Combo-eligible: render full coloured cell
+                                _bg, _fg = _num_colour(_num)
+                                _outline = ("border:2px solid #f00;"
+                                            if _num in _sd_r_nums
+                                            else "border:1px solid rgba(0,0,0,.15);")
+                                _sd_html.append(
+                                    f"<td style='padding:2px 5px;text-align:center'>"
+                                    f"<span style='display:inline-block;background:{_bg};"
+                                    f"color:{_fg};{_outline}border-radius:3px;"
+                                    f"min-width:32px;padding:1px 4px;font-weight:600;"
+                                    f"line-height:1.3'>{_num}<br>"
+                                    f"<span style='font-size:.6rem;font-weight:400'>"
+                                    f"SL={_sl_val}</span></span></td>")
+                            else:
+                                # Above threshold: empty cell — visually disappears
+                                _sd_html.append(
+                                    "<td style='padding:0;border-bottom:"
+                                    "1px solid rgba(255,255,255,.04)'></td>")
                         _sd_html.append("</tr>")
 
                     _sd_html.append("</tbody></table></div>")
