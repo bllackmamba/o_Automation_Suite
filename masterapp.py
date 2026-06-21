@@ -836,22 +836,20 @@ def _w_strip_display(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _cvi_display(df: pd.DataFrame) -> pd.DataFrame:
-    """Display-only copy: strip w-prefix from positional columns and fill all-NaN Set_Label.
+    """Display-only copy: strip w-prefix from positional columns and synchronize Set_Label.
 
-    When Set_Label is entirely missing (e.g. D blocks without syndicate_id, or
-    numeric-coerced disk loads), falls back to Source_N sequential labels so
-    every row has a human-readable identifier.  Never modifies the caller's DataFrame.
+    Set_Label is always overwritten with w{n} labels that match engine addressing:
+    - If Row_ID is present (combined result or disk-loaded CVI): w{Row_ID} → w1…wN global
+    - Otherwise (individual block piece): w{local_position} → w1…wK for that block only
+    Never modifies the caller's DataFrame.
     """
     disp = _w_strip_display(df)
-    if ("Set_Label" in disp.columns
-            and disp["Set_Label"].isna().all()
-            and "Source" in disp.columns):
-        counts: dict = {}
-        labels = []
-        for src in disp["Source"].fillna("?"):
-            counts[src] = counts.get(src, 0) + 1
-            labels.append(f"{src}_{counts[src]}")
-        disp["Set_Label"] = labels
+    if "Set_Label" not in disp.columns:
+        return disp
+    if "Row_ID" in disp.columns:
+        disp["Set_Label"] = disp["Row_ID"].apply(lambda r: f"w{int(r)}" if pd.notna(r) else "w?")
+    else:
+        disp["Set_Label"] = [f"w{i + 1}" for i in range(len(disp))]
     return disp
 
 
