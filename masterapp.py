@@ -3163,14 +3163,20 @@ elif page == "🧩 Variable Inputs":
                     return ordered, sl
 
                 # Pre-compute present orders for each requested draw.
-                # threshold = number of distinct SL-group values for that draw
-                # (mirrors the n_groups logic in R generation).  Only numbers
-                # with SL ≤ threshold render as coloured; the rest are empty,
-                # creating the natural staircase taper the user wants to see.
+                # Threshold = SL value of the pick-th distinct SL group.
+                # _sd_pick mirrors the r_max_comb / pick setting used in Rainbow
+                # generation so the coloured band matches the combo window.
+                # sorted_groups[pick-1] gives the SL cutoff of the 6th group
+                # (e.g. SL=5 for SAT), leaving ~27 coloured cells and the rest
+                # empty — the taper depth varies per draw, which IS the signal.
+                _sd_pick = GAMES_CFG[_gkey].get(
+                    "r_max_comb", GAMES_CFG[_gkey].get("pick", 6))
                 _sd_draws_data = []
                 for _di in range(min(_sd_n, len(_sd_rows))):
-                    _ord, _sld = _sd_present_order(_di, _sd_rows, _sd_pool)
-                    _sd_thresh  = len(set(_sld.values()))
+                    _ord, _sld        = _sd_present_order(_di, _sd_rows, _sd_pool)
+                    _sorted_groups    = sorted(set(_sld.values()))
+                    _sd_thresh        = _sorted_groups[
+                        min(_sd_pick - 1, len(_sorted_groups) - 1)]
                     _sd_draws_data.append((_sd_rows[_di]["draw"],
                                            _sd_rows[_di]["date"],
                                            _ord, _sld, _sd_thresh))
