@@ -3162,28 +3162,17 @@ elif page == "🧩 Variable Inputs":
                     ordered = sorted(range(1, pool + 1), key=lambda n: (sl[n], n))
                     return ordered, sl
 
-                # Pre-compute present orders for each requested draw.
-                # Threshold = SL value of the pick-th distinct SL group.
-                # _sd_pick mirrors the r_max_comb / pick setting used in Rainbow
-                # generation so the coloured band matches the combo window.
-                # sorted_groups[pick-1] gives the SL cutoff of the 6th group
-                # (e.g. SL=5 for SAT), leaving ~27 coloured cells and the rest
-                # empty — the taper depth varies per draw, which IS the signal.
-                _sd_pick = GAMES_CFG[_gkey].get(
-                    "r_max_comb", GAMES_CFG[_gkey].get("pick", 6))
-                # Fixed row order from the most-recent draw (index 0).
-                # Every column iterates this same list so the same number
-                # always sits at the same row — colours line up vertically.
-                _sd_fixed_order, _ = _sd_present_order(0, _sd_rows, _sd_pool)
+                # Pre-compute each draw's own present order (no threshold filtering).
+                # Every column shows all 45 numbers ranked by that draw's SL.
+                # The diagonal staircase emerges naturally: numbers at SL=0 in
+                # the most-recent column shift down in older columns as their SL
+                # grows, creating the movement pattern across draws.
                 _sd_draws_data = []
                 for _di in range(min(_sd_n, len(_sd_rows))):
-                    _ord, _sld        = _sd_present_order(_di, _sd_rows, _sd_pool)
-                    _sorted_groups    = sorted(set(_sld.values()))
-                    _sd_thresh        = _sorted_groups[
-                        min(_sd_pick - 1, len(_sorted_groups) - 1)]
+                    _ord, _sld = _sd_present_order(_di, _sd_rows, _sd_pool)
                     _sd_draws_data.append((_sd_rows[_di]["draw"],
                                            _sd_rows[_di]["date"],
-                                           _ord, _sld, _sd_thresh))
+                                           _ord, _sld))
 
                 if not _sd_draws_data:
                     st.info("Not enough draw history to display.")
@@ -3197,7 +3186,7 @@ elif page == "🧩 Variable Inputs":
                         "<th style='background:#222;color:#aaa;padding:3px 6px;"
                         "text-align:center;white-space:nowrap;min-width:36px'>Rank</th>",
                     ]
-                    for _dl, _date, _ord, _sld, _thr in _sd_draws_data:
+                    for _dl, _date, _ord, _sld in _sd_draws_data:
                         _sd_html.append(
                             f"<th style='background:#222;color:#ccc;padding:3px 8px;"
                             f"text-align:center;white-space:nowrap;min-width:54px'>"
@@ -3207,35 +3196,26 @@ elif page == "🧩 Variable Inputs":
                     _sd_html.append("</tr></thead><tbody>")
 
                     for _rank in range(_sd_pool):
-                        _num    = _sd_fixed_order[_rank]   # fixed across all columns
                         _row_bg = "#1a1a1a" if _rank % 2 == 0 else "#141414"
                         _sd_html.append(
                             f"<tr style='background:{_row_bg}'>"
                             f"<td style='padding:2px 4px;text-align:center;"
                             f"color:#555;font-size:.7rem'>{_rank + 1}</td>")
-                        for _dl, _date, _ord, _sld, _thr in _sd_draws_data:
+                        for _dl, _date, _ord, _sld in _sd_draws_data:
+                            _num    = _ord[_rank]
                             _sl_val = _sld.get(_num, 0)
-                            if _sl_val <= _thr:
-                                # Combo-eligible: render full coloured cell
-                                _bg, _fg = _num_colour(_num)
-                                _outline = ("border:2px solid #f00;"
-                                            if _num in _sd_r_nums
-                                            else "border:1px solid rgba(0,0,0,.15);")
-                                _sd_html.append(
-                                    f"<td style='padding:2px 5px;text-align:center'>"
-                                    f"<span style='display:inline-block;background:{_bg};"
-                                    f"color:{_fg};{_outline}border-radius:3px;"
-                                    f"min-width:32px;padding:1px 4px;font-weight:600;"
-                                    f"line-height:1.3'>{_num}<br>"
-                                    f"<span style='font-size:.6rem;font-weight:400'>"
-                                    f"SL={_sl_val}</span></span></td>")
-                            else:
-                                # Above threshold: blank cell, same height as filled
-                                _sd_html.append(
-                                    "<td style='padding:2px 5px;text-align:center'>"
-                                    "<span style='display:inline-block;min-width:32px;"
-                                    "padding:1px 4px;line-height:1.3;"
-                                    "min-height:2em'>&nbsp;</span></td>")
+                            _bg, _fg = _num_colour(_num)
+                            _outline = ("border:2px solid #f00;"
+                                        if _num in _sd_r_nums
+                                        else "border:1px solid rgba(0,0,0,.15);")
+                            _sd_html.append(
+                                f"<td style='padding:2px 5px;text-align:center'>"
+                                f"<span style='display:inline-block;background:{_bg};"
+                                f"color:{_fg};{_outline}border-radius:3px;"
+                                f"min-width:32px;padding:1px 4px;font-weight:600;"
+                                f"line-height:1.3'>{_num}<br>"
+                                f"<span style='font-size:.6rem;font-weight:400'>"
+                                f"SL={_sl_val}</span></span></td>")
                         _sd_html.append("</tr>")
 
                     _sd_html.append("</tbody></table></div>")
