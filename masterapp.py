@@ -3171,6 +3171,10 @@ elif page == "🧩 Variable Inputs":
                 # empty — the taper depth varies per draw, which IS the signal.
                 _sd_pick = GAMES_CFG[_gkey].get(
                     "r_max_comb", GAMES_CFG[_gkey].get("pick", 6))
+                # Fixed row order from the most-recent draw (index 0).
+                # Every column iterates this same list so the same number
+                # always sits at the same row — colours line up vertically.
+                _sd_fixed_order, _ = _sd_present_order(0, _sd_rows, _sd_pool)
                 _sd_draws_data = []
                 for _di in range(min(_sd_n, len(_sd_rows))):
                     _ord, _sld        = _sd_present_order(_di, _sd_rows, _sd_pool)
@@ -3203,13 +3207,13 @@ elif page == "🧩 Variable Inputs":
                     _sd_html.append("</tr></thead><tbody>")
 
                     for _rank in range(_sd_pool):
+                        _num    = _sd_fixed_order[_rank]   # fixed across all columns
                         _row_bg = "#1a1a1a" if _rank % 2 == 0 else "#141414"
                         _sd_html.append(
                             f"<tr style='background:{_row_bg}'>"
                             f"<td style='padding:2px 4px;text-align:center;"
                             f"color:#555;font-size:.7rem'>{_rank + 1}</td>")
                         for _dl, _date, _ord, _sld, _thr in _sd_draws_data:
-                            _num    = _ord[_rank]
                             _sl_val = _sld.get(_num, 0)
                             if _sl_val <= _thr:
                                 # Combo-eligible: render full coloured cell
