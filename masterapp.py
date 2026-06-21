@@ -2748,7 +2748,7 @@ elif page == "🧩 Variable Inputs":
                     unsafe_allow_html=True)
 
         # ── inner sub-tabs ─────────────────────────────────────────────────
-        _r_inner = st.tabs(["▶ Generate R", "🎨 Present Order"])
+        _r_inner = st.tabs(["▶ Generate R", "🎨 Present Order", "📊 Stacked Draws"])
 
         # ══ inner sub-tab 0 : Generate R ══════════════════════════════════
         with _r_inner[0]:
@@ -3057,6 +3057,162 @@ elif page == "🧩 Variable Inputs":
 
                 except Exception as _po_ex:
                     st.error(f"Present Order error: {_po_ex}")
+
+        # ══ inner sub-tab 2 : Stacked Draws ═══════════════════════════════
+        with _r_inner[2]:
+            st.markdown("**Stacked Draws — last N draws, present-order ranked, side by side**")
+            st.markdown(
+                '<div class="info">'
+                'Each strip = one draw. Numbers run top→bottom in <b>present order</b> '
+                'for that draw (SL=0 at top, oldest at bottom). '
+                'Background colour = value range. '
+                '<span style="border:2px solid #f00;padding:0 4px;border-radius:3px">'
+                'Red outline</span> = number appears in any current R combo.<br>'
+                '<b>Legend:</b> '
+                '<span style="background:#FFFF00;color:#000;padding:1px 6px;border-radius:3px">■ 1–9</span> '
+                '<span style="background:#00B0F0;color:#000;padding:1px 6px;border-radius:3px">■ 10–19</span> '
+                '<span style="background:#A0A0A0;color:#000;padding:1px 6px;border-radius:3px">■ 20–29</span> '
+                '<span style="background:#92D050;color:#000;padding:1px 6px;border-radius:3px">■ 30–39</span> '
+                '<span style="background:#FF69B4;color:#fff;padding:1px 6px;border-radius:3px">■ 40–49</span>'
+                '</div>',
+                unsafe_allow_html=True)
+
+            _sd_hist = gs("DrawHist", pd.DataFrame())
+            if _sd_hist is None or (_sd_hist is not None and _sd_hist.empty):
+                st.markdown(
+                    '<div class="warn">⚠️ No draw history loaded. '
+                    'Go to the <b>Stats</b> tab → Draw History → Fetch to load it.</div>',
+                    unsafe_allow_html=True)
+            else:
+                _sd_pool      = _gcfg.get("pool", 45)
+                _sd_available = len(_sd_hist)
+
+                _sd_n = st.slider(
+                    "Number of draws to display:",
+                    1, min(_sd_available, 10), min(4, _sd_available),
+                    key="sd_n_draws")
+
+                def _sd_parse_nums(val):
+                    """Parse numbers column back from CSV string '[1, 5, 12 …]' or list."""
+                    if isinstance(val, list):
+                        return [int(x) for x in val]
+                    s = str(val).strip("[]")
+                    result = []
+                    for tok in s.split(","):
+                        tok = tok.strip()
+                        if tok.isdigit():
+                            result.append(int(tok))
+                    return result
+
+                # Build rows list (newest-first) with enough look-back for SL computation
+                _sd_lookback = _sd_n + _sd_pool
+                _sd_rows: list = []
+                for _, _sdr in _sd_hist.head(_sd_lookback).iterrows():
+                    _sd_rows.append({
+                        "draw": str(_sdr.get("draw", "")),
+                        "date": str(_sdr.get("date", ""))[:10],
+                        "nums": set(_sd_parse_nums(_sdr.get("numbers", ""))),
+                    })
+
+                # Collect all numbers that appear in any current R combo (for red outline)
+                _sd_r_df   = gs("R", pd.DataFrame())
+                _sd_r_nums: set = set()
+                if _sd_r_df is not None and not _sd_r_df.empty:
+                    _sd_int_cols = [c for c in _sd_r_df.columns
+                                    if isinstance(c, int)
+                                    or (isinstance(c, str) and str(c).isdigit())]
+                    for _, _sdrow in _sd_r_df.iterrows():
+                        for _sdc in _sd_int_cols:
+                            _sdv = _sdrow[_sdc]
+                            if pd.notna(_sdv):
+                                try:
+                                    _sdi = int(_sdv)
+                                    if _sdi >= 1:
+                                        _sd_r_nums.add(_sdi)
+                                except Exception:
+                                    pass
+
+                def _sd_present_order(draw_idx: int, history: list, pool: int):
+                    """Return (ordered_list, sl_dict) for the draw at history[draw_idx].
+
+                    history is newest-first.  SL for number n at draw_idx k:
+                    - 0  if n is in history[k]
+                    - j  if n is in history[k+j] (j draws before this one)
+                    - len(history)-k  if n never seen in remaining history
+                    """
+                    sl: dict = {}
+                    for num in range(1, pool + 1):
+                        for back in range(draw_idx, len(history)):
+                            if num in history[back]["nums"]:
+                                sl[num] = back - draw_idx
+                                break
+                        else:
+                            sl[num] = len(history) - draw_idx
+                    ordered = sorted(range(1, pool + 1), key=lambda n: (sl[n], n))
+                    return ordered, sl
+
+                # Pre-compute present orders for each requested draw
+                _sd_draws_data = []
+                for _di in range(min(_sd_n, len(_sd_rows))):
+                    _ord, _sld = _sd_present_order(_di, _sd_rows, _sd_pool)
+                    _sd_draws_data.append((_sd_rows[_di]["draw"],
+                                           _sd_rows[_di]["date"],
+                                           _ord, _sld))
+
+                if not _sd_draws_data:
+                    st.info("Not enough draw history to display.")
+                else:
+                    # ── HTML table: rows = rank (1..pool), cols = one draw per strip ──
+                    _sd_html = [
+                        "<div style='overflow-x:auto'>",
+                        "<table style='border-collapse:collapse;font-size:.78rem;"
+                        "font-family:monospace;table-layout:fixed'>",
+                        "<thead><tr>",
+                        "<th style='background:#222;color:#aaa;padding:3px 6px;"
+                        "text-align:center;white-space:nowrap;min-width:36px'>Rank</th>",
+                    ]
+                    for _dl, _date, _ord, _sld in _sd_draws_data:
+                        _sd_html.append(
+                            f"<th style='background:#222;color:#ccc;padding:3px 8px;"
+                            f"text-align:center;white-space:nowrap;min-width:54px'>"
+                            f"D{_dl}<br>"
+                            f"<span style='font-size:.65rem;color:#888'>{_date}</span>"
+                            f"</th>")
+                    _sd_html.append("</tr></thead><tbody>")
+
+                    for _rank in range(_sd_pool):
+                        _row_bg = "#1a1a1a" if _rank % 2 == 0 else "#141414"
+                        _sd_html.append(
+                            f"<tr style='background:{_row_bg}'>"
+                            f"<td style='padding:2px 4px;text-align:center;"
+                            f"color:#555;font-size:.7rem'>{_rank + 1}</td>")
+                        for _dl, _date, _ord, _sld in _sd_draws_data:
+                            _num    = _ord[_rank]
+                            _bg, _fg = _num_colour(_num)
+                            _sl_val = _sld.get(_num, 0)
+                            _outline = ("border:2px solid #f00;"
+                                        if _num in _sd_r_nums
+                                        else "border:1px solid rgba(0,0,0,.15);")
+                            _sd_html.append(
+                                f"<td style='padding:2px 5px;text-align:center'>"
+                                f"<span style='display:inline-block;background:{_bg};"
+                                f"color:{_fg};{_outline}border-radius:3px;"
+                                f"min-width:32px;padding:1px 4px;font-weight:600;"
+                                f"line-height:1.3'>{_num}<br>"
+                                f"<span style='font-size:.6rem;font-weight:400'>"
+                                f"SL={_sl_val}</span></span></td>")
+                        _sd_html.append("</tr>")
+
+                    _sd_html.append("</tbody></table></div>")
+                    st.markdown("".join(_sd_html), unsafe_allow_html=True)
+
+                    if _sd_r_nums:
+                        st.caption(
+                            f"Red outline = in R combos ({len(_sd_r_nums)} numbers): "
+                            f"{sorted(_sd_r_nums)}")
+                    else:
+                        st.caption(
+                            "No R loaded — generate R first to see red outlines.")
 
     # ── TAB: D (Direct) ────────────────────────────────────────────────────
     with vtabs[2]:
