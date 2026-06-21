@@ -491,6 +491,29 @@ def _auto_load_b(game_key: str = "sat") -> pd.DataFrame:
     return pd.DataFrame()
 
 
+def _auto_filter_d_and_wire(gk: str, gdirs: dict) -> None:
+    """AUTO mode only: load D_ALL, filter to the latest draw, regenerate Sp/So/Ep.
+
+    Stores the filtered D and the draw number in session state, then delegates
+    Sp/So/Ep regeneration to _auto_wire_generators so the generators always run
+    against the current draw's syndicates — not the full historical D_ALL.
+    MANUAL mode callers must never call this function.
+    """
+    d_all_path = gdirs["Games_Breakdown"] / f"D_ALL_{gk}.csv"
+    if not d_all_path.exists():
+        st.session_state[f"D__{gk}"] = pd.DataFrame()
+        return
+    d_all = _load_file(d_all_path)
+    if d_all.empty or "Draw_Number" not in d_all.columns:
+        st.session_state[f"D__{gk}"] = d_all
+        return
+    latest_draw = d_all["Draw_Number"].max()
+    d_active = d_all[d_all["Draw_Number"] == latest_draw].reset_index(drop=True)
+    st.session_state[f"D__{gk}"]          = d_active
+    st.session_state[f"active_draw__{gk}"] = latest_draw
+    _auto_wire_generators(gdirs, gk)
+
+
 def _init_state():
     # Re-init if S exists but uses the old unscoped key format (pre-game-isolation refactor).
     # Guard: skip if S (unscoped) already initialised AND game-scoped keys exist.
@@ -521,15 +544,18 @@ def _init_state():
     gs_set("main_data_path", "")
     gs_set("cvi",            {})
     gs_set("results",        {})
-    _boot_vars = [
-        (f"R__{_boot_gk}",  _boot_dirs["Rainbow"]        / f"R_{_boot_gk}.csv",  _load_file),
-        (f"D__{_boot_gk}",  _boot_dirs["Games_Breakdown"] / f"D_ALL_{_boot_gk}.csv", _load_file),
-        (f"Sp__{_boot_gk}", _boot_dirs["Splits"]          / f"Sp_{_boot_gk}.csv", _load_sets_file),
-        (f"So__{_boot_gk}", _boot_dirs["Splits_Combi"]    / f"So_{_boot_gk}.csv", _load_sets_file),
-        (f"Ep__{_boot_gk}", _boot_dirs["ExcelPro"]        / f"Ep_{_boot_gk}.csv", _load_file),
-    ]
-    for _bk, _bp, _bl in _boot_vars:
+    # R — always from disk
+    _r_boot = _boot_dirs["Rainbow"] / f"R_{_boot_gk}.csv"
+    st.session_state[f"R__{_boot_gk}"] = _load_file(_r_boot) if _r_boot.exists() else pd.DataFrame()
+    # Sp, So, Ep — disk first; AUTO will overwrite them via _auto_wire_generators below
+    for _bk, _bp, _bl in [
+        (f"Sp__{_boot_gk}", _boot_dirs["Splits"]       / f"Sp_{_boot_gk}.csv", _load_sets_file),
+        (f"So__{_boot_gk}", _boot_dirs["Splits_Combi"] / f"So_{_boot_gk}.csv", _load_sets_file),
+        (f"Ep__{_boot_gk}", _boot_dirs["ExcelPro"]     / f"Ep_{_boot_gk}.csv", _load_file),
+    ]:
         st.session_state[_bk] = _bl(_bp) if _bp.exists() else pd.DataFrame()
+    # D — boot is always AUTO: filter to latest draw and regenerate Sp/So/Ep
+    _auto_filter_d_and_wire(_boot_gk, _boot_dirs)
     # Init container status
     for db in DASHBOARDS:
         st.session_state.S["container_status"][db] = pd.DataFrame({
@@ -2159,20 +2185,30 @@ for _i, _gk in enumerate(GAME_KEYS):
         ):
             st.session_state["active_game"] = _gk
             _sw_dirs = game_dirs(_gk)
-            # B — always reload fresh from disk on game switch
+            # B — always reload fresh
             _b_new = _auto_load_b(_gk)
             st.session_state[f"B__{_gk}"] = _b_new if not _b_new.empty else pd.DataFrame()
-            # R, D, Sp, So, Ep — unconditional fresh reload from canonical disk files
-            _sw_vars = [
-                (f"R__{_gk}",  _sw_dirs["Rainbow"]       / f"R_{_gk}.csv",  _load_file),
-                (f"D__{_gk}",  _sw_dirs["Games_Breakdown"]/ f"D_ALL_{_gk}.csv", _load_file),
-                (f"Sp__{_gk}", _sw_dirs["Splits"]         / f"Sp_{_gk}.csv", _load_sets_file),
-                (f"So__{_gk}", _sw_dirs["Splits_Combi"]   / f"So_{_gk}.csv", _load_sets_file),
-                (f"Ep__{_gk}", _sw_dirs["ExcelPro"]       / f"Ep_{_gk}.csv", _load_file),
-            ]
-            for _sw_key, _sw_path, _sw_loader in _sw_vars:
+            # R — always from disk
+            _r_sw = _sw_dirs["Rainbow"] / f"R_{_gk}.csv"
+            st.session_state[f"R__{_gk}"] = _load_file(_r_sw) if _r_sw.exists() else pd.DataFrame()
+            # Sp, So, Ep — disk first (AUTO overwrites via _auto_wire_generators)
+            for _sw_key, _sw_path, _sw_loader in [
+                (f"Sp__{_gk}", _sw_dirs["Splits"]       / f"Sp_{_gk}.csv", _load_sets_file),
+                (f"So__{_gk}", _sw_dirs["Splits_Combi"] / f"So_{_gk}.csv", _load_sets_file),
+                (f"Ep__{_gk}", _sw_dirs["ExcelPro"]     / f"Ep_{_gk}.csv", _load_file),
+            ]:
                 st.session_state[_sw_key] = (
                     _sw_loader(_sw_path) if _sw_path.exists() else pd.DataFrame()
+                )
+            # D — AUTO: filter to latest draw and regenerate Sp/So/Ep
+            #     MANUAL: load full D_ALL unchanged
+            _sw_mode = st.session_state.get("S", {}).get("auto", {}).get("_global", "Auto")
+            if _sw_mode == "Auto":
+                _auto_filter_d_and_wire(_gk, _sw_dirs)
+            else:
+                _d_sw = _sw_dirs["Games_Breakdown"] / f"D_ALL_{_gk}.csv"
+                st.session_state[f"D__{_gk}"] = (
+                    _load_file(_d_sw) if _d_sw.exists() else pd.DataFrame()
                 )
             st.rerun()
 
