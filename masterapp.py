@@ -3088,12 +3088,15 @@ elif page == "🧩 Variable Inputs":
                 '</div>',
                 unsafe_allow_html=True)
 
-            # Read the CSV directly with dtype=str so the "numbers" column
-            # (stored as '[3, 6, 9, 14, 21, 22]') is not coerced to NaN by
-            # _load_file's numeric=True default.
-            _sd_hist_path = _gdirs.get("SinceLast", _gdirs.get("Base", Path("."))) / "draw_history.csv"
-            _sd_hist = (pd.read_csv(_sd_hist_path, dtype=str)
-                        if _sd_hist_path.exists() else pd.DataFrame())
+            _sd_hist_path = (
+                _gdirs.get("SinceLast", _gdirs.get("Base", Path(".")))
+                / "draw_history.csv"
+            )
+            _sd_hist = (
+                pd.read_csv(_sd_hist_path, dtype=str)
+                if _sd_hist_path.exists()
+                else pd.DataFrame()
+            )
             if _sd_hist.empty:
                 st.markdown(
                     '<div class="warn">⚠️ No draw history loaded. '
