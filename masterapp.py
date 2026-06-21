@@ -254,7 +254,7 @@ def _num_colour(n: int) -> tuple:
     if n <= 9:   return ("#FFFF00", "#000")
     if n <= 19:  return ("#00B0F0", "#000")
     if n <= 29:  return ("#A0A0A0", "#000")
-    if n <= 40:  return ("#92D050", "#000")
+    if n <= 39:  return ("#92D050", "#000")
     return               ("#FF69B4", "#fff")
 
 
@@ -2847,8 +2847,8 @@ elif page == "🧩 Variable Inputs":
                 '<span style="background:#FFFF00;color:#000;padding:1px 6px;border-radius:3px">■ 1–9</span> '
                 '<span style="background:#00B0F0;color:#000;padding:1px 6px;border-radius:3px">■ 10–19</span> '
                 '<span style="background:#A0A0A0;color:#000;padding:1px 6px;border-radius:3px">■ 20–29</span> '
-                '<span style="background:#92D050;color:#000;padding:1px 6px;border-radius:3px">■ 30–40</span> '
-                '<span style="background:#FF69B4;color:#fff;padding:1px 6px;border-radius:3px">■ 41–49</span>'
+                '<span style="background:#92D050;color:#000;padding:1px 6px;border-radius:3px">■ 30–39</span> '
+                '<span style="background:#FF69B4;color:#fff;padding:1px 6px;border-radius:3px">■ 40–49</span>'
                 '</div>',
                 unsafe_allow_html=True)
 
@@ -3854,8 +3854,8 @@ elif page == "🧩 Variable Inputs":
                      "Group": ("🟡 1–9" if num <= 9
                                else "🔵 10–19" if num <= 19
                                else "⬜ 20–29" if num <= 29
-                               else "🟢 30–40" if num <= 40
-                               else "🩷 41–49")}
+                               else "🟢 30–39" if num <= 39
+                               else "🩷 40–49")}
                     for i, num in enumerate(all_wt)
                 ])
                 show_paginated_df(sl_display, key="sl_display_tbl", use_container_width=True)
