@@ -507,7 +507,14 @@ def _auto_filter_d_and_wire(gk: str, gdirs: dict) -> None:
     if d_all.empty or "Draw_Number" not in d_all.columns:
         st.session_state[f"D__{gk}"] = d_all
         return
-    latest_draw = d_all["Draw_Number"].max()
+    from datetime import date
+    d_all["_draw_date"] = pd.to_datetime(d_all["Draw_Date"], errors="coerce")
+    today = pd.Timestamp(date.today())
+    future = d_all[d_all["_draw_date"] >= today]
+    if future.empty:
+        future = d_all  # fallback: use all if no future dates found
+    latest_draw = future.loc[future["_draw_date"].idxmin(), "Draw_Number"]
+    d_all = d_all.drop(columns=["_draw_date"])
     d_active = d_all[d_all["Draw_Number"] == latest_draw].reset_index(drop=True)
     st.session_state[f"D__{gk}"]          = d_active
     st.session_state[f"active_draw__{gk}"] = latest_draw
@@ -551,7 +558,7 @@ def _init_state():
     for _bk, _bp, _bl in [
         (f"Sp__{_boot_gk}", _boot_dirs["Splits"]       / f"Sp_{_boot_gk}.csv", _load_sets_file),
         (f"So__{_boot_gk}", _boot_dirs["Splits_Combi"] / f"So_{_boot_gk}.csv", _load_sets_file),
-        (f"Ep__{_boot_gk}", _boot_dirs["ExcelPro"]     / f"Ep_{_boot_gk}.csv", _load_file),
+        (f"Ep__{_boot_gk}", _boot_dirs["ExcelPro"]     / f"Ep_{_boot_gk}.csv", _load_sets_file),
     ]:
         st.session_state[_bk] = _bl(_bp) if _bp.exists() else pd.DataFrame()
     # D — boot is always AUTO: filter to latest draw and regenerate Sp/So/Ep
@@ -2195,7 +2202,7 @@ for _i, _gk in enumerate(GAME_KEYS):
             for _sw_key, _sw_path, _sw_loader in [
                 (f"Sp__{_gk}", _sw_dirs["Splits"]       / f"Sp_{_gk}.csv", _load_sets_file),
                 (f"So__{_gk}", _sw_dirs["Splits_Combi"] / f"So_{_gk}.csv", _load_sets_file),
-                (f"Ep__{_gk}", _sw_dirs["ExcelPro"]     / f"Ep_{_gk}.csv", _load_file),
+                (f"Ep__{_gk}", _sw_dirs["ExcelPro"]     / f"Ep_{_gk}.csv", _load_sets_file),
             ]:
                 st.session_state[_sw_key] = (
                     _sw_loader(_sw_path) if _sw_path.exists() else pd.DataFrame()
