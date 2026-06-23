@@ -3589,6 +3589,12 @@ elif page == "🧩 Variable Inputs":
                             f"✅ Active draw set to **Draw {_draw_sel}** → "
                             f"**{len(_filt):,} rows** now in memory. "
                             f"CVI Matrix and all downstream steps use this draw only.")
+                        if len(_filt) < 4:
+                            st.warning(
+                                f"⚠️ Draw {_draw_sel} has only **{len(_filt):,}** "
+                                "syndicate row(s). Generator rerun requires ≥ 4 rows — "
+                                "Sp / So / Ep were **not** regenerated. "
+                                "Select a draw with more data or scrape additional syndicates.")
                     # Invalidate stale Sp/So/Ep results and persisted split-point
                     # widget keys so they recompute fresh from the new D, not the
                     # previously-loaded full D.
