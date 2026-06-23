@@ -507,18 +507,7 @@ def _auto_filter_d_and_wire(gk: str, gdirs: dict) -> None:
     if d_all.empty or "Draw_Number" not in d_all.columns:
         st.session_state[f"D__{gk}"] = d_all
         return
-    from datetime import date
-    d_all["_draw_date"] = pd.to_datetime(d_all["Draw_Date"], errors="coerce")
-    today = pd.Timestamp(date.today())
-    future = d_all[d_all["_draw_date"] >= today]
-    if future.empty:
-        future = d_all  # fallback: use all if no future dates found
-    _dd_valid = future["_draw_date"].dropna()
-    if not _dd_valid.empty:
-        latest_draw = future.loc[_dd_valid.idxmin(), "Draw_Number"]
-    else:
-        latest_draw = d_all["Draw_Number"].max()  # all dates unparseable — use max draw
-    d_all = d_all.drop(columns=["_draw_date"])
+    latest_draw = d_all.groupby("Draw_Number").size().idxmax()
     d_active = d_all[d_all["Draw_Number"] == latest_draw].reset_index(drop=True)
     st.session_state[f"D__{gk}"]          = d_active
     st.session_state[f"active_draw__{gk}"] = latest_draw
