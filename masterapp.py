@@ -571,6 +571,10 @@ def _init_state():
             except Exception:
                 pass
             st.session_state[_vk] = pd.DataFrame()
+    # Load persisted container formula for the boot game
+    _formula_path = _boot_dirs["Formulas"] / "last_formula.txt"
+    if _formula_path.exists():
+        st.session_state[f"last_formula__{_boot_gk}"] = _formula_path.read_text().strip()
     # D — boot is always AUTO: filter to latest draw and regenerate Sp/So/Ep
     _auto_filter_d_and_wire(_boot_gk, _boot_dirs)
     # Init container status
@@ -2202,6 +2206,12 @@ for _i, _gk in enumerate(GAME_KEYS):
         ):
             st.session_state["active_game"] = _gk
             _sw_dirs = game_dirs(_gk)
+            # Load persisted formula for the switched-to game
+            _sw_formula_path = _sw_dirs["Formulas"] / "last_formula.txt"
+            if _sw_formula_path.exists():
+                _sw_formula = _sw_formula_path.read_text().strip()
+                st.session_state[f"last_formula__{_gk}"] = _sw_formula
+                st.session_state["cf_formula_str"] = _sw_formula
             # B — always reload fresh
             _b_new = _auto_load_b(_gk)
             st.session_state[f"B__{_gk}"] = _b_new if not _b_new.empty else pd.DataFrame()
@@ -4528,8 +4538,9 @@ elif page == "📦 Container Formula":
 
     # ── Formula input: free-text + quick-pick hint buttons ────────────────
     _CF_KNOWN_VARS = {"B", "R", "D", "Ep", "Sp", "So"}
-    if "cf_formula_str" not in S:
-        S["cf_formula_str"] = "BRD"
+    if "cf_formula_str" not in st.session_state:
+        _persisted_formula = st.session_state.get(f"last_formula__{_gkey}", "")
+        st.session_state["cf_formula_str"] = _persisted_formula if _persisted_formula else "BRD"
 
     st.caption("Quick-pick predefined formulas:")
     _hint_row_size = 9
@@ -4560,6 +4571,8 @@ elif page == "📦 Container Formula":
 
     comps = _cf_tokens
     chosen_f = "".join(_cf_tokens)
+    (_gdirs["Formulas"] / "last_formula.txt").write_text(chosen_f_raw.strip())
+    st.session_state[f"last_formula__{_gkey}"] = chosen_f_raw.strip()
     st.write(f"**Components:** {' + '.join(comps)}")
     # Resolve to base variables (strip trailing digits, de-dup) — must match
     # execute_collation, so D1D2D3 checks for D (not D1/D2/D3), B1B2B3 → B, etc.
