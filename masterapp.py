@@ -3387,7 +3387,7 @@ elif page == "🧩 Variable Inputs":
                     st.session_state.pop(_d_draw_key, None)  # clear any prior draw filter
                     st.success(f"✅ Loaded {len(df_d_loaded):,} rows from {_fp.name} "
                                f"(sorted longest → shortest)")
-                    _auto_wire_generators(_gdirs, _gkey)
+                    _auto_filter_d_and_wire(_gkey, _gdirs)
 
             # ── Load ALL per-state files for this game ──────────────────────
             with c_loadall:
@@ -3433,7 +3433,7 @@ elif page == "🧩 Variable Inputs":
                                 f"**{len(_d_combined):,} rows** · "
                                 f"{len(_d_combined.columns)} cols "
                                 f"(duplicates removed, sorted longest → shortest)")
-                            _auto_wire_generators(_gdirs, _gkey)
+                            _auto_filter_d_and_wire(_gkey, _gdirs)
                         else:
                             st.error("No state D files could be loaded.")
                 else:
@@ -3544,6 +3544,9 @@ elif page == "🧩 Variable Inputs":
                         st.session_state.pop(_k, None)
                     for _var in ("Sp", "So", "Ep"):
                         gs_set(_var, pd.DataFrame())
+                    # TODO: "All draws" branch clears active_draw__{gk} (pop above) before
+                    # calling _auto_wire_generators — generators will use full D_ALL unfiltered.
+                    # Consider whether _auto_filter_d_and_wire should be used here too.
                     _auto_wire_generators(_gdirs, _gkey)
                     st.rerun()
 
