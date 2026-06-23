@@ -7,6 +7,7 @@ supporting helpers, and _auto_wire_generators which auto-runs them after D loads
 """
 
 import re
+import warnings
 
 import pandas as pd
 import streamlit as st
@@ -460,7 +461,17 @@ def _auto_wire_generators(gdirs: dict, gk: str):
     column-oriented sets, then feeds them to the generators. Results are stored
     in st.session_state and written to disk so subsequent tabs show them instantly.
     """
-    d_df = st.session_state.get(f"D__{gk}", pd.DataFrame())
+    _cvi_path = gdirs["CVI"] / f"CVI_Matrix_ALL_{gk}.csv"
+    if _cvi_path.exists():
+        d_df = pd.read_csv(_cvi_path)
+    else:
+        warnings.warn(
+            f"_auto_wire_generators: CVI Matrix not found at {_cvi_path}; "
+            "falling back to D from session state (standard 6-pick rows — "
+            "System extended picks will be missing).",
+            stacklevel=2,
+        )
+        d_df = st.session_state.get(f"D__{gk}", pd.DataFrame())
     if d_df is None or d_df.empty:
         return
 
