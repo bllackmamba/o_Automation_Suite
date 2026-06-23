@@ -24,7 +24,23 @@ __all__ = [
     "prepare_ep_objects",
     "generate_excelpro",
     "_auto_wire_generators",
+    "_is_valid_sets_file",
 ]
+
+
+# ── Output validation ─────────────────────────────────────────────────────────
+
+def _is_valid_sets_file(df: pd.DataFrame, max_val: int) -> bool:
+    """Return True if all numeric values in a sets DataFrame are <= max_val.
+    Rejects degenerate output where row indices leaked in as values."""
+    if df is None or df.empty:
+        return False
+    val_cols = [c for c in df.columns if c not in ("Set_Label", "w")]
+    if not val_cols:
+        return False
+    numeric = df[val_cols].apply(pd.to_numeric, errors="coerce")
+    mx = numeric.stack().max()
+    return bool(mx <= max_val)
 
 
 # ── Row / column transpose helpers ────────────────────────────────────────────
@@ -488,6 +504,9 @@ def _auto_wire_generators(gdirs: dict, gk: str):
     if d_df is None or d_df.empty:
         return
 
+    from syndicate_core.config import GAMES_CFG
+    pool = GAMES_CFG.get(gk, {}).get("pool", 45)
+
     auto_status = st.empty()
     msgs = []
 
@@ -497,10 +516,17 @@ def _auto_wire_generators(gdirs: dict, gk: str):
         if not sp_input.empty:
             sp_df = generate_splits(sp_input)
             if not sp_df.empty:
-                st.session_state[f"Sp__{gk}"] = sp_df
-                sp_path = gdirs["Splits"] / f"Sp_{gk}.csv"
-                _sets_df_to_rows(sp_df).to_csv(sp_path, index=False)
-                msgs.append(f"Sp ({sp_df.shape[1]} cols)")
+                _sp_rows = _sets_df_to_rows(sp_df)
+                if not _is_valid_sets_file(_sp_rows, pool):
+                    warnings.warn(
+                        f"_auto_wire_generators [{gk}]: Sp output invalid "
+                        f"(max value > {pool}) — skipping write",
+                        stacklevel=2,
+                    )
+                else:
+                    st.session_state[f"Sp__{gk}"] = sp_df
+                    _sp_rows.to_csv(gdirs["Splits"] / f"Sp_{gk}.csv", index=False)
+                    msgs.append(f"Sp ({sp_df.shape[1]} cols)")
     except Exception as _sp_ex:
         msgs.append(f"Sp error: {_sp_ex}")
 
@@ -510,10 +536,17 @@ def _auto_wire_generators(gdirs: dict, gk: str):
         if not so_input.empty:
             so_df = generate_splits_combi(so_input)
             if not so_df.empty:
-                st.session_state[f"So__{gk}"] = so_df
-                so_path = gdirs["Splits_Combi"] / f"So_{gk}.csv"
-                _sets_df_to_rows(so_df).to_csv(so_path, index=False)
-                msgs.append(f"So ({so_df.shape[1]} cols)")
+                _so_rows = _sets_df_to_rows(so_df)
+                if not _is_valid_sets_file(_so_rows, pool):
+                    warnings.warn(
+                        f"_auto_wire_generators [{gk}]: So output invalid "
+                        f"(max value > {pool}) — skipping write",
+                        stacklevel=2,
+                    )
+                else:
+                    st.session_state[f"So__{gk}"] = so_df
+                    _so_rows.to_csv(gdirs["Splits_Combi"] / f"So_{gk}.csv", index=False)
+                    msgs.append(f"So ({so_df.shape[1]} cols)")
     except Exception as _so_ex:
         msgs.append(f"So error: {_so_ex}")
 

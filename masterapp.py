@@ -565,6 +565,23 @@ def _init_state():
         (f"Ep__{_boot_gk}", _boot_dirs["ExcelPro"]     / f"Ep_{_boot_gk}.csv", _load_sets_file),
     ]:
         st.session_state[_bk] = _bl(_bp) if _bp.exists() else pd.DataFrame()
+    # Reject stale Sp/So disk loads before AUTO overwrites them
+    from syndicate_core.generators import _is_valid_sets_file as _ivs
+    from syndicate_core.config import GAMES_CFG as _GCFG
+    _boot_pool = _GCFG.get(_boot_gk, {}).get("pool", 45)
+    for _vk, _vp in [
+        (f"Sp__{_boot_gk}", _boot_dirs["Splits"]       / f"Sp_{_boot_gk}.csv"),
+        (f"So__{_boot_gk}", _boot_dirs["Splits_Combi"] / f"So_{_boot_gk}.csv"),
+    ]:
+        _loaded = st.session_state.get(_vk, pd.DataFrame())
+        if not _loaded.empty and not _ivs(_loaded, _boot_pool):
+            import warnings as _w
+            _w.warn(f"Boot: stale/invalid {_vk} rejected — will regenerate")
+            try:
+                _vp.unlink()
+            except Exception:
+                pass
+            st.session_state[_vk] = pd.DataFrame()
     # D — boot is always AUTO: filter to latest draw and regenerate Sp/So/Ep
     _auto_filter_d_and_wire(_boot_gk, _boot_dirs)
     # Init container status
@@ -2211,6 +2228,21 @@ for _i, _gk in enumerate(GAME_KEYS):
                 st.session_state[_sw_key] = (
                     _sw_loader(_sw_path) if _sw_path.exists() else pd.DataFrame()
                 )
+            # Reject stale Sp/So disk loads before AUTO overwrites them
+            _sw_pool = GAMES_CFG.get(_gk, {}).get("pool", 45)
+            for _sw_vk, _sw_vp in [
+                (f"Sp__{_gk}", _sw_dirs["Splits"]       / f"Sp_{_gk}.csv"),
+                (f"So__{_gk}", _sw_dirs["Splits_Combi"] / f"So_{_gk}.csv"),
+            ]:
+                _sw_loaded = st.session_state.get(_sw_vk, pd.DataFrame())
+                if not _sw_loaded.empty and not _is_valid_sets_file(_sw_loaded, _sw_pool):
+                    import warnings as _sw_w
+                    _sw_w.warn(f"Game switch: stale/invalid {_sw_vk} rejected — will regenerate")
+                    try:
+                        _sw_vp.unlink()
+                    except Exception:
+                        pass
+                    st.session_state[_sw_vk] = pd.DataFrame()
             # D — AUTO: filter to latest draw and regenerate Sp/So/Ep
             #     MANUAL: load full D_ALL unchanged
             _sw_mode = st.session_state.get("S", {}).get("auto", {}).get("_global", "Auto")
@@ -3544,10 +3576,7 @@ elif page == "🧩 Variable Inputs":
                         st.session_state.pop(_k, None)
                     for _var in ("Sp", "So", "Ep"):
                         gs_set(_var, pd.DataFrame())
-                    # TODO: "All draws" branch clears active_draw__{gk} (pop above) before
-                    # calling _auto_wire_generators — generators will use full D_ALL unfiltered.
-                    # Consider whether _auto_filter_d_and_wire should be used here too.
-                    _auto_wire_generators(_gdirs, _gkey)
+                    _auto_filter_d_and_wire(_gkey, _gdirs)
                     st.rerun()
 
             # ── Active draw status banner ───────────────────────────────────
