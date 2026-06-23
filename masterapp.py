@@ -4534,6 +4534,173 @@ elif page == "🧩 Variable Inputs":
                 st.caption(f"Last 5 rows of B ({len(_b_for_stats)} total rows, "
                            f"{len(_wcols_b)} w-columns):")
             show_paginated_df(_tail_b, key="stats_b_tail", use_container_width=True)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SELECTED COUNTS — per-variable SC (decentralized)
+    # ═══════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown('<span class="sec-hdr">📊 Selected Counts — compute per variable</span>',
+                unsafe_allow_html=True)
+    st.caption(
+        "SC files are named SC_{VAR}_{game}.csv and are formula-agnostic. "
+        "Compute distributions against Main Data, pick thresholds, then Save. "
+        "Container Dashboards load these automatically before formula-level SC."
+    )
+
+    # ── Helper: detect n-columns from main data (mirrors run_matching heuristic) ──
+    def _vi_n_cols(mdf: pd.DataFrame) -> list:
+        _exp = [c for c in mdf.columns if re.match(r'^n\d+$', c, re.I)]
+        if _exp:
+            return sorted(_exp, key=lambda x: int(re.sub(r'\D', '', x) or 0))[:20]
+        _BLOCKED = frozenset({
+            "postcode", "draw_number", "draw_no", "draw", "length",
+            "share_cost", "available_shares", "total_shares",
+            "outlet_id", "syndicate_id", "row_number", "rownum",
+        })
+        cands = []
+        for _c in mdf.columns:
+            if _c.lower() in _BLOCKED:
+                continue
+            _s = pd.to_numeric(mdf[_c], errors="coerce")
+            if _s.notna().mean() > 0.9 and _s.max() <= 99:
+                cands.append(_c)
+        return sorted(cands, key=lambda x: int(re.sub(r'\D', '', x) or 0))[:20]
+
+    _vi_main = gs("main_data", pd.DataFrame())
+
+    # ── AUTO SC button ──────────────────────────────────────────────────────
+    if st.button("🔄 Compute SC — All Variables", key=f"auto_sc_all_{_gkey}",
+                 use_container_width=True,
+                 help="Compute per-position count distributions for every loaded "
+                      "variable against Main Data. Results appear in the expanders below."):
+        if _vi_main.empty:
+            st.warning("⚠️ Main Data not loaded — load it in Container Dashboards first.")
+        else:
+            _vi_ncols = _vi_n_cols(_vi_main)
+            if not _vi_ncols:
+                st.warning("⚠️ Main Data has no numeric n-columns.")
+            else:
+                _vi_var_map = {v: gs(v, pd.DataFrame())
+                               for v in ["B", "R", "D", "Ep", "So", "Sp"]}
+                with st.spinner("Computing SC for all variables…"):
+                    _auto_res = _run_sc_auto(
+                        ["B", "R", "D", "Ep", "So", "Sp"],
+                        _vi_var_map, _vi_main, _vi_ncols,
+                        _gkey, _gdirs,
+                        is_direct_map=_IS_DIRECT,
+                        force_col_map=_FORCE_COL,
+                    )
+                for _var, _res in _auto_res.items():
+                    if _res["status"] == "ok":
+                        gs_set(f"_sc_counts_{_var}", _res["distributions"])
+                        st.success(f"✅ {_var} — "
+                                   f"{len(_res['distributions']) - 1} positions computed")
+                    elif _res["status"] == "skipped":
+                        st.info(f"⏭ {_var} — skipped ({_res['reason']})")
+                    else:
+                        st.error(f"❌ {_var} — error: {_res['reason']}")
+
+    st.markdown("---")
+
+    # ── Per-variable SC expanders ───────────────────────────────────────────
+    # (var_name, is_direct, force_column_oriented)
+    _sc_var_cfg = [
+        ("B",  False, False),
+        ("R",  False, False),
+        ("D",  True,  False),
+        ("Ep", False, False),
+        ("So", False, False),
+        ("Sp", False, True),
+    ]
+
+    for _scv, _scv_direct, _scv_fcol in _sc_var_cfg:
+        _scv_df   = gs(_scv, pd.DataFrame())
+        _scv_path = _gdirs["Selected_Counts"] / f"SC_{_scv}_{_gkey}.csv"
+        _scv_ok   = _scv_path.exists()
+        _scv_lbl  = "✅" if _scv_ok else "⚠️ not found"
+        _scv_loaded = not ((_scv_df is None) or
+                           (isinstance(_scv_df, pd.DataFrame) and _scv_df.empty))
+
+        with st.expander(
+                f"📊 {_scv} — Selected Counts  ·  {_scv_lbl}",
+                expanded=False):
+
+            st.caption(f"SC_{_scv}_{_gkey}.csv  {_scv_lbl}  "
+                       f"·  {_scv} in session: {'✅' if _scv_loaded else '⚠️ not loaded'}")
+
+            # ── Compute button ────────────────────────────────────────────
+            if st.button(f"Compute SC for {_scv}",
+                         key=f"compute_sc_{_scv}_{_gkey}",
+                         disabled=not _scv_loaded):
+                if _vi_main.empty:
+                    st.warning("⚠️ Main Data not loaded — load it in Container Dashboards.")
+                else:
+                    _vi_nc = _vi_n_cols(_vi_main)
+                    if not _vi_nc:
+                        st.warning("⚠️ Main Data has no numeric n-columns.")
+                    else:
+                        with st.spinner(f"Computing SC for {_scv}…"):
+                            _scv_counts_new = _compute_sc_block(
+                                _scv, _scv_df, _vi_main, _vi_nc,
+                                is_direct=_scv_direct,
+                                force_column_oriented=_scv_fcol,
+                            )
+                        if _scv_counts_new:
+                            gs_set(f"_sc_counts_{_scv}", _scv_counts_new)
+                            st.success(f"✅ {_scv} — "
+                                       f"{len(_scv_counts_new) - 1} positions computed")
+                        else:
+                            st.error("SC computation returned empty — check variable and "
+                                     "Main Data are compatible.")
+
+            # ── Distribution table + threshold multiselects ───────────────
+            _scv_counts = gs(f"_sc_counts_{_scv}")
+            if _scv_counts:
+                _scv_dist = _sc_distribution_table(_scv_counts)
+                if not _scv_dist.empty:
+
+                    with st.expander("Distribution table", expanded=False):
+                        show_paginated_df(
+                            _scv_dist, key=f"sc_dist_{_scv}_{_gkey}",
+                            use_container_width=True, hide_index=True)
+
+                    _scv_positions = sorted(
+                        [k for k in _scv_counts if k != "_meta"],
+                        key=lambda x: int(x[1:]) if x[1:].isdigit() else 0,
+                    )
+                    st.markdown("**Select SC thresholds per position:**")
+                    _n_pos = len(_scv_positions)
+                    _n_cols_ui = min(4, max(1, _n_pos))
+                    _scv_ui_cols = st.columns(_n_cols_ui)
+                    _scv_choices: dict = {}
+                    for _pi, _pos in enumerate(_scv_positions):
+                        _pos_dist = _scv_dist[_scv_dist["position"] == _pos]
+                        _cv = sorted(_pos_dist["count_value"].tolist())
+                        with _scv_ui_cols[_pi % _n_cols_ui]:
+                            _sel = st.multiselect(
+                                _pos, _cv, default=[],
+                                key=f"sc_sel_{_scv}_{_pos}_{_gkey}",
+                            )
+                            if _sel:
+                                _scv_choices[_pos] = _sel
+
+                    if _scv_choices:
+                        if st.button(
+                                f"💾 Save SC_{_scv}_{_gkey}.csv",
+                                key=f"save_sc_{_scv}_{_gkey}",
+                                type="primary"):
+                            try:
+                                _saved = _save_sc_block(
+                                    _scv, _gkey, _scv_choices, _gdirs)
+                                st.success(f"Saved → {_saved.name}")
+                            except Exception as _sc_ex:
+                                st.error(f"Save failed: {_sc_ex}")
+                    else:
+                        st.caption(
+                            "Select at least one threshold above to enable Save.")
+            else:
+                st.caption("Run Compute SC to see distributions.")
+
 elif page == "📦 Container Formula":
     st.markdown('<span class="sec-hdr hdr-purple">📦 Container Formula — Live Collation</span>',
                 unsafe_allow_html=True)
