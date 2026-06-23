@@ -971,6 +971,23 @@ def execute_collation(components: list[str]) -> pd.DataFrame:
     combined.insert(0, "Row_ID", range(1, len(combined) + 1))
     return combined
 
+
+def collation_with_sc(
+    components: list,
+    game_key: str,
+    gdirs: dict,
+) -> tuple:
+    """Run execute_collation and auto-build sc_dict from per-variable SC files.
+
+    Returns (cvi_df, sc_dict). sc_dict is {} when no per-variable SC files exist.
+    Container Dashboards can call this instead of execute_collation and use the
+    returned sc_dict as the default (still overridable via the SC upload widget).
+    """
+    cvi_df = execute_collation(components)
+    base_vars = list({re.sub(r"\d+$", "", c) for c in components if c})
+    sc_dict = _load_sc_blocks(base_vars, game_key, gdirs)
+    return cvi_df, sc_dict
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 7. SCRAPER ENGINE (Playwright + requests)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -4931,18 +4948,27 @@ elif page == "🖥️ Container Dashboards":
 
     # ── Auto-load SC ───────────────────────────────────────────────────────
     sc_auto = {}
-    sc_folder = _gdirs["Selected_Counts"]
-    for sc_file in (sorted(sc_folder.glob(f"SC_{formula_name}*.csv")) +
-                    sorted(sc_folder.glob(f"SC_{formula_name}*.xlsx"))):
-        try:
-            df_sc = (pd.read_excel(sc_file, engine="openpyxl")
-                     if sc_file.suffix.lower() == ".xlsx"
-                     else pd.read_csv(sc_file))
-            if "w" in df_sc.columns and "Selected Count" in df_sc.columns:
-                for _, row in df_sc.iterrows():
-                    sc_auto[str(row["w"])] = str(row["Selected Count"])
-        except Exception as _e:
-            logging.warning("SC auto-load: could not read %s: %s", sc_file, _e)
+
+    # 1. Per-variable SC files (formula-agnostic, decentralized)
+    _comps = COMP_MAP.get(formula_name, []) or [formula_name]
+    _base_vars = list({re.sub(r"\d+$", "", c) for c in _comps if c})
+    if _base_vars:
+        sc_auto = _load_sc_blocks(_base_vars, gk, _gdirs)
+
+    # 2. Fall back to formula-level SC file (legacy — keeps existing uploads working)
+    if not sc_auto:
+        sc_folder = _gdirs["Selected_Counts"]
+        for sc_file in (sorted(sc_folder.glob(f"SC_{formula_name}*.csv")) +
+                        sorted(sc_folder.glob(f"SC_{formula_name}*.xlsx"))):
+            try:
+                df_sc = (pd.read_excel(sc_file, engine="openpyxl")
+                         if sc_file.suffix.lower() == ".xlsx"
+                         else pd.read_csv(sc_file))
+                if "w" in df_sc.columns and "Selected Count" in df_sc.columns:
+                    for _, row in df_sc.iterrows():
+                        sc_auto[str(row["w"])] = str(row["Selected Count"])
+            except Exception as _e:
+                logging.warning("SC auto-load: could not read %s: %s", sc_file, _e)
 
     # ── Auto-scan and load Main Data ──────────────────────────────────────
     main_df = gs("main_data", pd.DataFrame())
