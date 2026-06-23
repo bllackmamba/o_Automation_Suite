@@ -12,6 +12,8 @@ import warnings
 import pandas as pd
 import streamlit as st
 
+from syndicate_core.pipeline import _write_csv_atomic
+
 __all__ = [
     "_sets_df_to_rows",
     "_rows_to_sets_df",
@@ -507,6 +509,14 @@ def _auto_wire_generators(gdirs: dict, gk: str):
         d_df = st.session_state.get(f"D__{gk}", pd.DataFrame())
     if d_df is None or d_df.empty:
         return
+    if len(d_df) < 4:
+        warnings.warn(
+            f"_auto_wire_generators [{gk}]: draw {active_draw} has only "
+            f"{len(d_df)} syndicate row(s) — need ≥ 4. "
+            "Skipping Sp/So/Ep regeneration.",
+            stacklevel=2,
+        )
+        return
 
     from syndicate_core.config import GAMES_CFG
     pool = GAMES_CFG.get(gk, {}).get("pool", 45)
@@ -524,12 +534,12 @@ def _auto_wire_generators(gdirs: dict, gk: str):
                 if not _is_valid_sets_file(_sp_rows, pool):
                     warnings.warn(
                         f"_auto_wire_generators [{gk}]: Sp output invalid "
-                        f"(max value > {pool}) — skipping write",
+                        f"(failed _is_valid_sets_file check, pool={pool}) — skipping write",
                         stacklevel=2,
                     )
                 else:
                     st.session_state[f"Sp__{gk}"] = sp_df
-                    _sp_rows.to_csv(gdirs["Splits"] / f"Sp_{gk}.csv", index=False)
+                    _write_csv_atomic(gdirs["Splits"] / f"Sp_{gk}.csv", _sp_rows, index=False)
                     msgs.append(f"Sp ({sp_df.shape[1]} cols)")
     except Exception as _sp_ex:
         msgs.append(f"Sp error: {_sp_ex}")
@@ -544,12 +554,12 @@ def _auto_wire_generators(gdirs: dict, gk: str):
                 if not _is_valid_sets_file(_so_rows, pool):
                     warnings.warn(
                         f"_auto_wire_generators [{gk}]: So output invalid "
-                        f"(max value > {pool}) — skipping write",
+                        f"(failed _is_valid_sets_file check, pool={pool}) — skipping write",
                         stacklevel=2,
                     )
                 else:
                     st.session_state[f"So__{gk}"] = so_df
-                    _so_rows.to_csv(gdirs["Splits_Combi"] / f"So_{gk}.csv", index=False)
+                    _write_csv_atomic(gdirs["Splits_Combi"] / f"So_{gk}.csv", _so_rows, index=False)
                     msgs.append(f"So ({so_df.shape[1]} cols)")
     except Exception as _so_ex:
         msgs.append(f"So error: {_so_ex}")
@@ -569,7 +579,7 @@ def _auto_wire_generators(gdirs: dict, gk: str):
                 if not ep_df.empty:
                     st.session_state[f"Ep__{gk}"] = ep_df
                     ep_path = gdirs["ExcelPro"] / f"Ep_{gk}.csv"
-                    ep_df.to_csv(ep_path, index=False)
+                    _write_csv_atomic(ep_path, ep_df, index=False)
                     msgs.append(f"Ep ({len(ep_df)} rows)")
         except Exception as _ep_ex:
             msgs.append(f"Ep error: {_ep_ex}")
