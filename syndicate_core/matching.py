@@ -962,7 +962,25 @@ def _parallel_worker(args: tuple) -> dict:
             main_df[col] = pd.to_numeric(main_df[col], errors="coerce")
 
         sc_dict = {}
-        if sc_path and Path(sc_path).exists():
+
+        # 1. Try per-variable SC files (formula-agnostic, decentralized)
+        if sc_path:
+            _sc_dir = Path(sc_path).parent
+            _formulas_dir = _sc_dir.parent
+            _folder_name = _formulas_dir.name
+            _gk = (_folder_name.replace("formulas_", "")
+                   if _folder_name.startswith("formulas_") else "sat")
+            if _sc_dir.exists():
+                from syndicate_core.config import COMP_MAP
+                from syndicate_core.collation import _load_sc_blocks
+                _comps = COMP_MAP.get(formula_name, []) or [formula_name]
+                _base_vars = list({re.sub(r"\d+$", "", p) for p in _comps if p})
+                if _base_vars:
+                    sc_dict = _load_sc_blocks(
+                        _base_vars, _gk, {"Selected_Counts": _sc_dir})
+
+        # 2. Fall back to formula-level SC file
+        if not sc_dict and sc_path and Path(sc_path).exists():
             sc_df = pd.read_csv(sc_path)
             if "w" in sc_df.columns and "Selected Count" in sc_df.columns:
                 for _, row in sc_df.iterrows():
