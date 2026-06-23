@@ -31,12 +31,16 @@ __all__ = [
 # ── Output validation ─────────────────────────────────────────────────────────
 
 def _is_valid_sets_file(df: pd.DataFrame, max_val: int) -> bool:
-    """Return True if all numeric values in a sets DataFrame are <= max_val.
-    Rejects degenerate output where row indices leaked in as values."""
+    """Return True if all numeric values in a sets DataFrame are <= max_val
+    and the number of position columns does not exceed the pool size.
+    Rejects degenerate output where row indices leaked in as values, and
+    rejects pathologically wide files (e.g. 2175-col Sp from unfiltered D)."""
     if df is None or df.empty:
         return False
     val_cols = [c for c in df.columns if c not in ("Set_Label", "w")]
     if not val_cols:
+        return False
+    if len(val_cols) > max_val:
         return False
     numeric = df[val_cols].apply(pd.to_numeric, errors="coerce")
     mx = numeric.stack().max()
