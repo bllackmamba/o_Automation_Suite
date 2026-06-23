@@ -25,6 +25,8 @@ __all__ = [
     # lottolyzer scraping
     "_fetch_html", "_bs4_find_tables",
     "fetch_number_frequencies", "fetch_draw_history", "fetch_since_last",
+    # draw number scraping
+    "fetch_current_draw_number",
 ]
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -569,6 +571,35 @@ def _fetch_html(url: str, timeout: int = 30) -> str | None:
         except Exception:
             pass
     return None
+
+
+def fetch_current_draw_number(game_key: str) -> int | None:
+    """Scrape thelott.com play page to get the current selling draw number.
+
+    Returns the draw number as int, or None if scraping fails.
+    Uses SSL bypass already established in this module.
+    """
+    import re
+    urls = {
+        "sat": "https://www.thelott.com/saturday-lotto/play",
+        "pb":  "https://www.thelott.com/powerball/play",
+        "oz":  "https://www.thelott.com/oz-lotto/play",
+        "sfl": "https://www.thelott.com/set-for-life/play",
+        "mwf": "https://www.thelott.com/monday-wednesday-lotto/play",
+    }
+    url = urls.get(game_key)
+    if not url:
+        return None
+    try:
+        html = _fetch_html(url, timeout=10)
+        if not html:
+            return None
+        m = re.search(r'[Dd]raw\s+(\d{4,5})', html)
+        if m:
+            return int(m.group(1))
+        return None
+    except Exception:
+        return None
 
 
 def _bs4_find_tables(html: str):

@@ -507,7 +507,12 @@ def _auto_filter_d_and_wire(gk: str, gdirs: dict) -> None:
     if d_all.empty or "Draw_Number" not in d_all.columns:
         st.session_state[f"D__{gk}"] = d_all
         return
-    latest_draw = d_all.groupby("Draw_Number").size().idxmax()
+    from syndicate_core.scraping import fetch_current_draw_number
+    _scraped = fetch_current_draw_number(gk)
+    if _scraped is not None and _scraped in d_all["Draw_Number"].values:
+        latest_draw = _scraped
+    else:
+        latest_draw = d_all.groupby("Draw_Number").size().idxmax()
     d_active = d_all[d_all["Draw_Number"] == latest_draw].reset_index(drop=True)
     st.session_state[f"D__{gk}"]          = d_active
     st.session_state[f"active_draw__{gk}"] = latest_draw
