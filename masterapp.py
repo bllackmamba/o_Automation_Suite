@@ -509,8 +509,18 @@ def _auto_filter_d_and_wire(gk: str, gdirs: dict) -> None:
         return
     from syndicate_core.scraping import fetch_current_draw_number
     _scraped = fetch_current_draw_number(gk)
+    _draw_path = gdirs["Formulas"] / "active_draw.txt"
     if _scraped is not None and _scraped in d_all["Draw_Number"].values:
         latest_draw = _scraped
+    elif _draw_path.exists():
+        try:
+            _persisted = int(_draw_path.read_text().strip())
+            if _persisted in d_all["Draw_Number"].values:
+                latest_draw = _persisted
+            else:
+                latest_draw = d_all.groupby("Draw_Number").size().idxmax()
+        except Exception:
+            latest_draw = d_all.groupby("Draw_Number").size().idxmax()
     else:
         latest_draw = d_all.groupby("Draw_Number").size().idxmax()
     d_active = d_all[d_all["Draw_Number"] == latest_draw].reset_index(drop=True)
@@ -2211,12 +2221,18 @@ for _i, _gk in enumerate(GAME_KEYS):
         ):
             st.session_state["active_game"] = _gk
             _sw_dirs = game_dirs(_gk)
-            # Load persisted formula for the switched-to game
+            # Load persisted formula and active draw for the switched-to game
             _sw_formula_path = _sw_dirs["Formulas"] / "last_formula.txt"
             if _sw_formula_path.exists():
                 _sw_formula = _sw_formula_path.read_text().strip()
                 st.session_state[f"last_formula__{_gk}"] = _sw_formula
                 st.session_state["cf_formula_str"] = _sw_formula
+            _sw_draw_path = _sw_dirs["Formulas"] / "active_draw.txt"
+            if _sw_draw_path.exists():
+                try:
+                    st.session_state[f"active_draw__{_gk}"] = int(_sw_draw_path.read_text().strip())
+                except Exception:
+                    pass
             # B — always reload fresh
             _b_new = _auto_load_b(_gk)
             st.session_state[f"B__{_gk}"] = _b_new if not _b_new.empty else pd.DataFrame()
@@ -3568,6 +3584,7 @@ elif page == "🧩 Variable Inputs":
                         else:
                             _filt = _df_full.copy()
                         gs_set("D", _filt)
+                        (_gdirs["Formulas"] / "active_draw.txt").write_text(str(int(_draw_sel)))
                         st.success(
                             f"✅ Active draw set to **Draw {_draw_sel}** → "
                             f"**{len(_filt):,} rows** now in memory. "

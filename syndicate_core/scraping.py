@@ -574,10 +574,8 @@ def _fetch_html(url: str, timeout: int = 30) -> str | None:
 
 
 def fetch_current_draw_number(game_key: str) -> int | None:
-    """Scrape thelott.com play page to get the current selling draw number.
-
+    """Scrape thelott.com play page for current selling draw number.
     Returns the draw number as int, or None if scraping fails.
-    Uses SSL bypass already established in this module.
     """
     import re
     urls = {
@@ -592,14 +590,13 @@ def fetch_current_draw_number(game_key: str) -> int | None:
         return None
     try:
         html = _fetch_html(url, timeout=10)
-        if not html:
-            return None
-        m = re.search(r'[Dd]raw\s+(\d{4,5})', html)
-        if m:
-            return int(m.group(1))
-        return None
+        if html:
+            m = re.search(r'[Dd]raw\s+(\d{4,5})', html)
+            if m:
+                return int(m.group(1))
     except Exception:
-        return None
+        pass
+    return None
 
 
 def _bs4_find_tables(html: str):
