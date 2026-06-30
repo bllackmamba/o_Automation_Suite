@@ -19,7 +19,8 @@ __pycache__/
 venv/
 .venv/
 env/
-.env
+.env*
+!.env.example
 
 # ── Streamlit secrets (never publish) ──
 .streamlit/secrets.toml
@@ -48,6 +49,15 @@ clusters.json
 *.xls
 *.accdb
 *.mdb
+
+# Compiled Java artifacts (build outputs, not source)
+*.class
+
+# core/ regenerate outputs — already covered by *.csv / *.accdb above,
+# listed explicitly for clarity (combined exports, 1n+1 stages, Access stores)
+core/*_combined.csv
+core/*_1nplus1_*.csv
+core/*.accdb
 
 # ───────────────────────────────────────────────────────────────
 # Want to publish ONE specific data file (e.g. the rules workbook)?
