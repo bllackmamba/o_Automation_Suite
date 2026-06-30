@@ -59,6 +59,10 @@ core/*_combined.csv
 core/*_1nplus1_*.csv
 core/*.accdb
 
+# Contains a plaintext MongoDB credential — never commit. Exact path only
+# (not a wildcard) so future legitimate increase*.py files aren't hidden.
+core/increase.py
+
 # ───────────────────────────────────────────────────────────────
 # Want to publish ONE specific data file (e.g. the rules workbook)?
 # After the repo exists, force-add it, e.g.:
