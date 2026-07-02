@@ -250,6 +250,7 @@ CHUNK_SIZE = 500_000. Run ONE game at a time. Test with 100K rows first.
 | 2026-06-14 | **Active Draw invalidation** — lock/unlock now clears Sp/So/Ep and recomputes from filtered D |
 | 2026-06-14 | **BUILD W-MATRIX respects Active Draw** — reads `gs("D")` first; raw CSV fallback only on first boot |
 | 2026-06-14 | **Container Formula custom combos** — accepts user-typed combinations (e.g. `EpSpSo`) in addition to the 17 predefined shortcuts |
+| 2026-07-02 | **CVI language + orientation guard** (`matching.py`, commit `53a5400`) — renamed `_parse_cvi_col`→`_parse_cvi_row` (definition, 2 call sites, `__all__`, docstring); a CVI w-position is a stored pandas column but conceptually a "w-row" (all numbers at that position across every combination). Fixed "w-column"/"CVI column" language in 4 docstrings/comments (`w_cols` variable left unchanged). Added `_assert_cvi_orientation(cvi_df, caller)` — raises `ValueError` on a transposed CVI (guard: `n_wcols > n_rows and n_rows <= 50 and n_wcols >= 20`; the `>= 20` floor avoids false positives on legitimately small CVIs like 3 combos × w1–w4). Called first thing in `_prepare_matching_state`, `run_matching`, and `run_matching_step` (setup call only). 93/93 tests pass. |
 
 ---
 
