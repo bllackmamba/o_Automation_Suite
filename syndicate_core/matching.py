@@ -23,12 +23,13 @@ __all__ = [
     "_count_csv_rows", "_duckdb_available",
     # core matching primitives
     "_match_chunk", "_match_duckdb", "_smart_match",
-    "_parse_cvi_col", "_count_matches",
+    "_parse_cvi_row", "_count_matches",
     # formatting
     "_count_str", "_breakdown_str",
     # stage helpers
     "_compute_stage_present", "_apply_stage_sc",
     # pre-loop + fill helpers
+    "_assert_cvi_orientation",
     "_prepare_matching_state", "_fill_exhausted_stages",
     # engines
     "run_matching", "run_matching_step", "_parallel_worker",
@@ -136,12 +137,19 @@ def _smart_match(main_df_or_path, n_cols: list,
         return _count_matches(main_df_or_path, n_cols, cvi_nums)
 
 
-def _parse_cvi_col(series: pd.Series) -> list[int]:
+def _parse_cvi_row(series: pd.Series) -> list[int]:
     """
-    Extract valid integers from a CVI column.
+    Extract valid integers from one CVI w-row.
+
+    The CVI DataFrame is stored with w-positions as pandas columns and
+    combinations as pandas rows. Calling cvi_df["w5"] returns a Series
+    whose values are all numbers that appear at position w5 across every
+    combination. This function reads that Series and returns the list of
+    valid integer values (NaN dropped, values >= 1 only).
+
     Handles floats (1.0→1), strings ("1"), NaN safely.
-    No upper range cap — CVI values are not raw lottery balls
-    and can legitimately exceed 45 depending on the collation formula.
+    No upper range cap — CVI values are not raw lottery balls and can
+    legitimately exceed 45 depending on the collation formula.
     """
     result = []
     for v in series.dropna():
@@ -239,7 +247,7 @@ def _compute_stage_present(
     elif present_label.startswith("S:") and not present_label.startswith("S:0"):
         present_label = f"S:{present_count}"
 
-    raw_cvi  = _parse_cvi_col(cvi_df[w])
+    raw_cvi  = _parse_cvi_row(cvi_df[w])
     cvi_nums = np.array(raw_cvi, dtype=np.float32)
 
     if not len(cvi_nums):
@@ -378,6 +386,57 @@ def _apply_stage_sc(
 
 # ── Pre-loop state preparation ────────────────────────────────────────────────
 
+def _assert_cvi_orientation(cvi_df: pd.DataFrame, caller: str = "") -> None:
+    """
+    Verify that the CVI DataFrame has the correct orientation:
+        Rows    = combinations  (many — typically thousands)
+        Columns = w-positions   (few — w1…w27 or similar)
+
+    If the DataFrame is transposed (w-positions as rows, combinations as
+    columns), _parse_cvi_row would silently read a single combination's
+    values instead of all values at that position, producing wrong match
+    counts with no error raised.
+
+    Raises ValueError immediately if orientation looks wrong.
+    """
+    if cvi_df is None or cvi_df.empty:
+        return
+
+    w_cols = [c for c in cvi_df.columns if re.match(r'^w\d+$', str(c), re.I)]
+    if not w_cols:
+        return  # no w-columns present — caller will handle this
+
+    n_rows = len(cvi_df)
+    n_wcols = len(w_cols)
+
+    # Correct orientation: many rows (combinations), few w-columns (positions).
+    # Transposed orientation: few rows (positions), many columns (combinations).
+    # Guard: raise only when w-labelled columns implausibly outnumber rows AND
+    # there are many of them (>= 20). A genuine .T of a small, correctly-oriented
+    # CVI loses its w-labels (columns become the old integer row index), so it is
+    # not detectable here anyway — the only w-labelled transpose worth catching is
+    # the pathological "many w-positions, few rows" shape. The n_wcols >= 20 floor
+    # prevents false positives on legitimately small CVIs (e.g. 3 combinations
+    # across w1-w4), which have more w-columns than rows but are correctly oriented.
+    if n_wcols > n_rows and n_rows <= 50 and n_wcols >= 20:
+        raise ValueError(
+            f"[{caller}] CVI DataFrame appears TRANSPOSED: "
+            f"{n_rows} rows × {n_wcols} w-columns. "
+            f"Expected orientation is combinations-as-rows and "
+            f"w-positions-as-columns. "
+            f"Call cvi_df.T or rebuild from source before passing to the engine."
+        )
+
+    # Secondary guard: if row count equals the number of w-positions (e.g. 7
+    # rows for w1-w7), warn — this is ambiguous and should be verified.
+    if n_rows == n_wcols and n_rows <= 50:
+        logging.warning(
+            "[%s] CVI DataFrame is square (%d × %d w-cols) — verify orientation "
+            "is combinations-as-rows, not w-positions-as-rows.",
+            caller, n_rows, n_wcols,
+        )
+
+
 def _prepare_matching_state(
     main_df: pd.DataFrame,
     cvi_df: pd.DataFrame,
@@ -391,6 +450,8 @@ def _prepare_matching_state(
         {"n_cols", "w_cols", "M", "small_enough",
          "main_count_map", "main_bd_map", "main_counts_map"}
     """
+    _assert_cvi_orientation(cvi_df, caller="_prepare_matching_state")
+
     if main_df.empty or cvi_df.empty:
         return None
 
@@ -450,7 +511,7 @@ def _prepare_matching_state(
         _duck_path = None
 
     for w in w_cols:
-        raw = _parse_cvi_col(cvi_df[w])
+        raw = _parse_cvi_row(cvi_df[w])
         if raw:
             mc = None
             if _duck_path is not None:
@@ -551,7 +612,7 @@ def run_matching(main_df: pd.DataFrame,
         "U" → Row N's present = Row N-1's UNSELECTED
         "S" → Row N's present = Row N-1's SELECTED
 
-    Main Count: pre-computed once against ORIGINAL main_df for every w-column.
+    Main Count: pre-computed once against ORIGINAL main_df for every w-row.
                 Never recalculated regardless of carry-forward state.
 
     Memory: if M > DISPLAY_THRESHOLD, per-row DataFrames are NOT stored —
@@ -560,7 +621,7 @@ def run_matching(main_df: pd.DataFrame,
     main_path (optional): path to the CSV that `main_df` was loaded from. When
         supplied AND it is a large CSV AND DuckDB is installed AND it is safe
         (file row-count == M and the n-columns are a contiguous n1…nN block),
-        the heavy *main-count pre-pass* (one full-M scan per w-column) is run in
+        the heavy *main-count pre-pass* (one full-M scan per w-row) is run in
         DuckDB instead of pandas. If DuckDB returns an unexpected length for any
         column, that column silently falls back to the pandas path, so results
         are always identical to the pure-pandas engine. Passing None (the
@@ -574,6 +635,8 @@ def run_matching(main_df: pd.DataFrame,
         `main_df` in RAM. Fully streaming the staged engine is a larger,
         separate change.
     """
+    _assert_cvi_orientation(cvi_df, caller="run_matching")
+
     state = _prepare_matching_state(main_df, cvi_df, main_path)
     if state is None:
         return {"selected": pd.DataFrame(), "unselected": pd.DataFrame(),
@@ -615,7 +678,7 @@ def run_matching(main_df: pd.DataFrame,
             main_df, cvi_df, n_cols, M)
         direction = stage_info["direction"]
 
-        # ── Empty CVI column ──────────────────────────────────────────
+        # ── Empty CVI w-row ───────────────────────────────────────────
         if stage_info["empty_cvi"]:
             present_df    = stage_info["present_df"]
             present_label = stage_info["present_label"]
@@ -742,6 +805,7 @@ def run_matching_step(
 
     # ── Setup ─────────────────────────────────────────────────────────────
     if resume_state is None:
+        _assert_cvi_orientation(cvi_df, caller="run_matching_step")
         if carry_fwd is None:
             carry_fwd = {}
         state = _prepare_matching_state(main_df, cvi_df, main_path)
