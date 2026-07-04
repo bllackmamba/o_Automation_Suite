@@ -31,6 +31,8 @@ __all__ = [
     # pre-loop + fill helpers
     "_assert_cvi_orientation",
     "_prepare_matching_state", "_fill_exhausted_stages",
+    # per-row CVI engine
+    "_match_cvi_row_counts", "_match_cvi_rows",
     # engines
     "run_matching", "run_matching_step", "_parallel_worker",
 ]
@@ -205,6 +207,81 @@ def _breakdown_str(counts: np.ndarray, sc_set: set,
         ",".join(str(k) for k in unsel_counts) or "No count",
         {f"S{k}": int((counts == k).sum()) for k in unique},
     )
+
+
+# ── Per-row CVI engine ──────────────────────────────────────────────────────────
+
+def _match_cvi_row_counts(cvi_nums: np.ndarray, main_arr: np.ndarray,
+                          pool_max: int) -> np.ndarray:
+    """Match-count per main-data row for ONE CVI row's numbers.
+
+    Builds a 0/1 lookup table indexed by ball value (0..pool_max) and gathers
+    it across ``main_arr``, summing along each combination. This is markedly
+    faster than repeated ``np.isin`` when called once per CVI row over millions
+    of main-data rows (the per-row engine's inner loop).
+
+    Precondition: ``main_arr`` values lie in 1..pool_max (true for real main
+    data). CVI numbers outside 1..pool_max cannot match main data and are
+    ignored. Returns an int array of length ``len(main_arr)``.
+    """
+    lut = np.zeros(pool_max + 1, dtype=np.int16)
+    valid = cvi_nums[(cvi_nums >= 1) & (cvi_nums <= pool_max)]
+    lut[valid] = 1
+    return lut[main_arr].sum(axis=1)
+
+
+def _match_cvi_rows(cvi_df: pd.DataFrame, main_arr: np.ndarray, *,
+                    pool_max: int, row_cols: list | None = None,
+                    source_col: str = "Source",
+                    progress_cb=None) -> pd.DataFrame:
+    """Per-row CVI match against the full main-data array (no staging).
+
+    For EVERY row in ``cvi_df``, count how many of that row's own numbers
+    appear in each main-data combination (each row of ``main_arr``) and record
+    the match-count distribution for that row INDEPENDENTLY — no carry-forward,
+    no w-position aggregation. Row i is matched against the entire main-data
+    set on its own. This is the row-by-row engine described in CLAUDE.md's
+    parked TODO.
+
+    ``main_arr`` is an (M, pick) int array of main-data numbers in 1..pool_max.
+    ``row_cols`` (the CVI's w-columns) is auto-detected as ``^w\\d+$`` when
+    omitted; only those columns feed ``_parse_cvi_row`` so identifier columns
+    like ``Row_ID`` are never mistaken for lottery numbers.
+
+    Returns a DataFrame with columns Row, [Source], Row_Length, Main_Count,
+    Main_Breakdown — the ``CVI_per_row_match_{game}_FULL.csv`` baseline schema.
+    """
+    if row_cols is None:
+        row_cols = [c for c in cvi_df.columns if re.match(r"^w\d+$", str(c), re.I)]
+        if not row_cols:
+            row_cols = [c for c in cvi_df.columns
+                        if c not in ("Row_ID", source_col, "Set_Label")]
+
+    has_source = source_col in cvi_df.columns
+    total = len(cvi_df)
+    records: list[dict] = []
+    for i in range(total):
+        row = cvi_df.iloc[i]
+        nums = _parse_cvi_row(row[row_cols])
+        row_len = len(nums)
+        rec: dict = {"Row": i + 1}
+        if has_source:
+            rec["Source"] = row[source_col]
+        rec["Row_Length"] = row_len
+        if row_len == 0:
+            rec["Main_Count"] = "—"
+            rec["Main_Breakdown"] = "—"
+        else:
+            counts = _match_cvi_row_counts(np.asarray(nums, dtype=np.int64),
+                                           main_arr, pool_max)
+            uniq, freq = np.unique(counts, return_counts=True)
+            rec["Main_Count"] = ",".join(str(int(v)) for v in uniq)
+            rec["Main_Breakdown"] = "  ".join(
+                f"S{int(v)}:{int(f)}" for v, f in zip(uniq, freq))
+        records.append(rec)
+        if progress_cb is not None and (i + 1) % 2000 == 0:
+            progress_cb(i + 1, total)
+    return pd.DataFrame(records)
 
 
 # ── Stage helpers (extracted from run_matching's loop body) ───────────────────
