@@ -8,6 +8,7 @@ import math
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from syndicate_core.matching import _match_cvi_rows, _match_cvi_row_counts
 
@@ -77,6 +78,32 @@ def test_every_row_distribution_sums_to_M():
     out = _match_cvi_rows(cvi, main, pool_max=7)
     total = sum(v for v in _bd_to_dict(out.iloc[0]["Main_Breakdown"]).values())
     assert total == len(main)
+
+
+def test_row_id_and_set_label_carried_through():
+    main = _full_space(6, 3)
+    cvi = pd.DataFrame([
+        {"Row_ID": 7, "Source": "B", "Set_Label": "alpha", "w1": 1, "w2": 2, "w3": 3},
+        {"Row_ID": 8, "Source": "D", "Set_Label": "beta", "w1": 4, "w2": 5, "w3": 6},
+    ])
+    out = _match_cvi_rows(cvi, main, pool_max=6)
+    assert list(out["Row_ID"]) == [7, 8]
+    assert list(out["Set_Label"]) == ["alpha", "beta"]
+    assert list(out["Source"]) == ["B", "D"]
+    # identifier columns precede the computed columns
+    assert list(out.columns) == [
+        "Row", "Row_ID", "Source", "Set_Label",
+        "Row_Length", "Main_Count", "Main_Breakdown",
+    ]
+
+
+def test_transposed_cvi_raises():
+    # Pathological transpose: many w-columns (>=20), few rows (<=50),
+    # w-cols outnumber rows -> orientation guard must raise.
+    main = _full_space(6, 3)
+    cvi = pd.DataFrame([{f"w{j}": j for j in range(1, 26)}])  # 1 row, 25 w-cols
+    with pytest.raises(ValueError):
+        _match_cvi_rows(cvi, main, pool_max=6)
 
 
 def test_out_of_pool_cvi_numbers_ignored():

@@ -248,16 +248,21 @@ def _match_cvi_rows(cvi_df: pd.DataFrame, main_arr: np.ndarray, *,
     omitted; only those columns feed ``_parse_cvi_row`` so identifier columns
     like ``Row_ID`` are never mistaken for lottery numbers.
 
-    Returns a DataFrame with columns Row, [Source], Row_Length, Main_Count,
-    Main_Breakdown — the ``CVI_per_row_match_{game}_FULL.csv`` baseline schema.
+    Returns a DataFrame with columns Row, [Row_ID], [Source], [Set_Label],
+    Row_Length, Main_Count, Main_Breakdown — the identifier columns are carried
+    through when present in ``cvi_df``. This is the
+    ``CVI_per_row_match_{game}_FULL.csv`` baseline schema.
     """
+    _assert_cvi_orientation(cvi_df, "_match_cvi_rows")
     if row_cols is None:
         row_cols = [c for c in cvi_df.columns if re.match(r"^w\d+$", str(c), re.I)]
         if not row_cols:
             row_cols = [c for c in cvi_df.columns
                         if c not in ("Row_ID", source_col, "Set_Label")]
 
+    has_row_id = "Row_ID" in cvi_df.columns
     has_source = source_col in cvi_df.columns
+    has_set_label = "Set_Label" in cvi_df.columns
     total = len(cvi_df)
     records: list[dict] = []
     for i in range(total):
@@ -265,8 +270,12 @@ def _match_cvi_rows(cvi_df: pd.DataFrame, main_arr: np.ndarray, *,
         nums = _parse_cvi_row(row[row_cols])
         row_len = len(nums)
         rec: dict = {"Row": i + 1}
+        if has_row_id:
+            rec["Row_ID"] = row["Row_ID"]
         if has_source:
             rec["Source"] = row[source_col]
+        if has_set_label:
+            rec["Set_Label"] = row["Set_Label"]
         rec["Row_Length"] = row_len
         if row_len == 0:
             rec["Main_Count"] = "—"
