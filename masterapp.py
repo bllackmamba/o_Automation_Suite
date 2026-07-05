@@ -4963,12 +4963,16 @@ elif page == "🖥️ Container Dashboards":
     # Show available CVI files
     matching_cvi = [f for f in all_cvi_files
                     if f.get("lotto") == lotto_sel or not f.get("lotto")]
-    st.markdown(f"**CVI files found for `{lotto_sel}`: {len(matching_cvi)}**")
     if matching_cvi:
-        cvi_preview_df = pd.DataFrame([{
-            "Formula": f["formula"], "Date": f["date"], "File": f["raw"]
-        } for f in matching_cvi])
-        show_paginated_df(cvi_preview_df, key="cd_cvi_preview", use_container_width=True, hide_index=True)
+        # Detail behind a chevron — the count stays on the label; the
+        # Formula/Date/File table reveals on expand (no permanent display).
+        with st.expander(
+                f"📄 CVI files found for `{lotto_sel}`: {len(matching_cvi)}",
+                expanded=False):
+            cvi_preview_df = pd.DataFrame([{
+                "Formula": f["formula"], "Date": f["date"], "File": f["raw"]
+            } for f in matching_cvi])
+            show_paginated_df(cvi_preview_df, key="cd_cvi_preview", use_container_width=True, hide_index=True)
     else:
         st.warning("No CVI files found. Collate formulas in Container Formula first.")
 
@@ -5073,23 +5077,15 @@ elif page == "🖥️ Container Dashboards":
 
     st.markdown("---")
 
-    # ── Dashboard stack ────────────────────────────────────────────────────
-    st.markdown("**Individual dashboard (open one at a time):**")
-    # Build list from all CVI files + hardcoded defaults
+    # ── Dashboard picker ───────────────────────────────────────────────────
+    # Build the list from all CVI files + hardcoded defaults. (The old
+    # always-on per-dashboard button list was removed — it duplicated this
+    # dropdown, which is the single way to open a dashboard.)
     cvi_found = [parse_cvi_filename(f.name)["formula"]
                  for f in sorted(_gdirs["CVI"].glob("CVI_*.csv"))]
     all_db_names = list(dict.fromkeys(
         [f"1n & {f}" for f in cvi_found] + DASHBOARDS
     ))
-    for db_name in all_db_names:
-        st.markdown(
-            f'<div style="background:#1a1a2e;border:1px solid #444;color:#ccc;'
-            f'font-size:.71rem;padding:2px 12px;margin-bottom:2px;'
-            f'display:inline-block;min-width:260px;">'
-            f'{db_name}…  Container Dashboard</div><br>',
-            unsafe_allow_html=True)
-
-    st.markdown("---")
     db = st.selectbox("Open Dashboard:", all_db_names,
                       format_func=lambda x: f"{x}… Container Dashboard")
     formula_name = db.replace("1n & ","")
