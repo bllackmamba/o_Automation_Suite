@@ -65,6 +65,10 @@ Games_increase/
 *.log
 *.status
 
+# 2021-era regeneration experiment archive (43MB scratch: old script
+# variants, bundled data, caches, .mega/.DS_Store junk). Kept locally only.
+core/all regene/
+
 # core/ regenerate outputs — already covered by *.csv / *.accdb above,
 # listed explicitly for clarity (combined exports, 1n+1 stages, Access stores)
 core/*_combined.csv
