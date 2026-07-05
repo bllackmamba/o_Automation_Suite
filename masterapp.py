@@ -5420,33 +5420,50 @@ elif page == "🖥️ Container Dashboards":
             st.caption("Per-column SC (from file): " +
                        "  |  ".join(f"{k}={v}" for k,v in sc_auto.items()))
         fallback_sc = st.text_input(
-            "Fallback Count (used if no SC file loaded):", "7",
-            key=f"scr_{db}")
+            "Count value (for “Same for all” / “Range” methods):", "7",
+            key=f"scr_{db}",
+            help="Applied only when SC source = Loaded from file and a Method "
+                 "other than Custom is chosen. It is NOT a fabricated fallback: "
+                 "with SC source = None the engine runs counts-only.")
 
-    # Build sc_dict: per w-column, specific threshold
-    # sc_auto keys look like "w1","w2",… or "1","2",… normalise to "w1","w2"
+    # ── SC source (Part B) — independent of run pace ──────────────────────
+    # FILE  = a Selected-Count criterion applies (auto-detected from a loaded
+    #         SC_ file, or supplied via the Method controls above).
+    # NONE  = counts only: sc_dict stays empty and the engine fabricates NO
+    #         fallback SC. Auto-detects to FILE when an SC file is present, but
+    #         can be overridden to NONE even if a file exists.
+    sc_src_key = f"sc_src_{db}"
+    if sc_src_key not in S:
+        S[sc_src_key] = "FILE" if sc_auto else "NONE"
+    _SC_SRC_OPTS = ["Loaded from file", "None (counts only)"]
+    _sc_src_pick = st.radio(
+        "SC source:", _SC_SRC_OPTS,
+        index=(0 if S[sc_src_key] == "FILE" else 1),
+        horizontal=True, key=f"sc_src_pick_{db}",
+        help="Loaded from file uses the SC_ file's per-w_row thresholds. "
+             "None runs counts-only — Main Count/Breakdown at every w_row, no "
+             "Selected/Unselected, and never a fabricated fallback SC.")
+    S[sc_src_key] = "FILE" if _sc_src_pick == _SC_SRC_OPTS[0] else "NONE"
+    if S[sc_src_key] == "FILE" and not sc_auto:
+        st.caption("No SC file detected for this formula — provide values via "
+                   "the Method controls above, or switch to None for counts-only.")
+
+    # Build sc_dict per w_row. Only when SC source is the loaded file (or manual
+    # Method values); NONE leaves it empty so no fallback SC is ever fabricated.
+    # sc_auto keys look like "w1","w2",… or "1","2",… — normalise to "w1","w2".
     sc_dict = {}
-    for k, v in sc_auto.items():
-        key = k if k.startswith("w") else f"w{k}"
-        sc_dict[key] = [int(x.strip()) for x in str(v).split(",")
-                        if x.strip().lstrip('-').isdigit()]
-
-    # If no SC file loaded, use fallback for all w-columns
-    if not sc_dict and fallback_sc:
-        fallback_list = [int(x.strip()) for x in fallback_sc.split(",")
+    if S[sc_src_key] == "FILE":
+        for k, v in sc_auto.items():
+            key = k if k.startswith("w") else f"w{k}"
+            sc_dict[key] = [int(x.strip()) for x in str(v).split(",")
+                            if x.strip().lstrip('-').isdigit()]
+        if sc_method == "Same for all" and fallback_sc:
+            same_list = [int(x.strip()) for x in fallback_sc.split(",")
                          if x.strip().lstrip('-').isdigit()]
-        w_keys = [c for c in (cvi_df.columns if not cvi_df.empty else [])
-                  if re.match(r'^w\d+$', c)]
-        for wk in w_keys:
-            sc_dict[wk] = fallback_list
-
-    if sc_method == "Same for all" and fallback_sc:
-        same_list = [int(x.strip()) for x in fallback_sc.split(",")
-                     if x.strip().lstrip('-').isdigit()]
-        w_keys = [c for c in (cvi_df.columns if not cvi_df.empty else [])
-                  if re.match(r'^w\d+$', c)]
-        for wk in w_keys:
-            sc_dict[wk] = same_list
+            w_keys = [c for c in (cvi_df.columns if not cvi_df.empty else [])
+                      if re.match(r'^w\d+$', c)]
+            for wk in w_keys:
+                sc_dict[wk] = same_list
 
     # ── Carry-forward direction toggles ───────────────────────────────────
     st.markdown("---")
@@ -5520,10 +5537,11 @@ elif page == "🖥️ Container Dashboards":
     # Build final carry_fwd dict (defaults to U)
     carry_fwd = {wk: S[cf_key].get(wk, "U") for wk in w_keys_cf}
 
-    # ── Is SC Available toggle ────────────────────────────────────────────
-    sc_avail_key = f"sc_avail_{db}"
-    if sc_avail_key not in S:
-        S[sc_avail_key] = "YES"
+    # ── Pace control state (Part B) — pace is independent of SC source ────
+    # Auto = run every w_row straight through; Manual = pause at each w_row.
+    pace_key = f"pace_{db}"
+    if pace_key not in S:
+        S[pace_key] = "Auto"
 
     # ── Individual run cluster label ───────────────────────────────────────
     ind_cl1, ind_cl2, ind_cl3 = st.columns([2, 2, 4])
@@ -5553,24 +5571,27 @@ elif page == "🖥️ Container Dashboards":
     # File prefix for individual run outputs
     ind_prefix = f"{ind_cluster}_{ind_lotto}_{ind_draw}_{formula_name}"
     st.markdown("---")
-    sa1, sa2, _ = st.columns([1,1,6])
-    with sa1:
-        if st.button("🟢 SC: YES (Auto)", key=f"sca_y_{db}",
-                     type="primary" if S[sc_avail_key]=="YES" else "secondary",
-                     use_container_width=True):
-            S[sc_avail_key] = "YES"
-            S.pop(f"step_state_{db}", None)
-            S.pop(f"step_pending_{db}", None)
-    with sa2:
-        if st.button("🔴 SC: NO (Manual)", key=f"sca_n_{db}",
-                     type="primary" if S[sc_avail_key]=="NO" else "secondary",
-                     use_container_width=True):
-            S[sc_avail_key] = "NO"
-            S.pop(f"step_state_{db}", None)
-            S.pop(f"step_pending_{db}", None)
-    if S[sc_avail_key] == "NO":
-        st.caption("Manual mode — engine pauses after each stage; "
-                   "pick SC values, then Continue.")
+    _pace_prev = S[pace_key]
+    _pace_pick = st.radio(
+        "Pace:", ["Auto", "Manual"],
+        index=(0 if S[pace_key] == "Auto" else 1),
+        horizontal=True, key=f"pace_pick_{db}",
+        help="Auto runs every w_row straight through. Manual pauses at each "
+             "w_row so you can accept or override SC values before continuing.")
+    S[pace_key] = _pace_pick
+    if _pace_pick != _pace_prev:
+        # Switching pace invalidates any in-flight step run.
+        S.pop(f"step_state_{db}", None)
+        S.pop(f"step_pending_{db}", None)
+    if S[pace_key] == "Auto" and S[sc_src_key] == "NONE":
+        st.caption("Auto + None — counts only: Main Count/Breakdown at every "
+                   "w_row; no Selected/Unselected populate.")
+
+    if S[pace_key] == "Manual":
+        st.caption("Manual mode — engine pauses after each w_row; "
+                   "pick SC values, then Continue."
+                   + ("  SC file values are pre-filled as a suggestion."
+                      if S[sc_src_key] == "FILE" else ""))
         st.markdown("---")
         can_run = not main_df.empty and not cvi_df.empty
         if not can_run:
@@ -5678,9 +5699,18 @@ elif page == "🖥️ Container Dashboards":
                         "any SC choice will complete the run).")
 
             _available_ks = sorted(int(k[1:]) for k in _cd)
+            # Manual + SC loaded: pre-fill the SC file's value for this w_row as
+            # a suggestion the user can accept or override (Part B). Manual +
+            # None leaves it empty so values are picked purely live.
+            _suggested_ks = []
+            if S[sc_src_key] == "FILE":
+                _stage_sc = sc_dict.get(
+                    _stage_w, sc_dict.get(str(int(_stage_w[1:])), []))
+                _suggested_ks = [k for k in _available_ks if k in set(_stage_sc)]
             _sc_chosen = st.multiselect(
-                f"Select count values for SC (stage {_stage_i}, {_stage_w}):",
+                f"Select count values for SC (w_row {_stage_i}, {_stage_w}):",
                 _available_ks,
+                default=_suggested_ks,
                 key=f"step_sc_choice_{db}_{_stage_i}",
             )
 
@@ -5714,7 +5744,7 @@ elif page == "🖥️ Container Dashboards":
                     st.rerun()
 
     else:
-        st.caption("Automated mode: all stages run sequentially without stopping.")
+        st.caption("Auto pace: every w_row runs sequentially without stopping.")
 
         # RUN MATCHING
         st.markdown("---")
