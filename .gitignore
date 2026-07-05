@@ -69,6 +69,14 @@ Games_increase/
 # variants, bundled data, caches, .mega/.DS_Store junk). Kept locally only.
 core/all regene/
 
+# Old masterapp.py variants + misc scratch (10MB). Kept locally only.
+_archive_old_versions/
+
+# 1n+1 working dir: 493MB c835.csv output + junk. Ignore CONTENTS (not the
+# dir) so the generate_835.py source can still be tracked via the negation.
+core/1n+1 real/*
+!core/1n+1 real/generate_835.py
+
 # core/ regenerate outputs — already covered by *.csv / *.accdb above,
 # listed explicitly for clarity (combined exports, 1n+1 stages, Access stores)
 core/*_combined.csv
