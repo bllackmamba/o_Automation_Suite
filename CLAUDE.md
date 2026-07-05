@@ -52,6 +52,20 @@ pytest tests/                                      # 26 tests
 python3 -m syndicate_core.check_config             # config self-test
 ```
 
+## Java accdb bridge
+
+`core/lib_accdb/` holds the Java bridge used to read/write MS Access `.accdb`
+files (`BuildAccdb`/`ReadAccdb`). It depends on **Jackcess 4.0.5** plus its
+Apache Commons runtime deps:
+
+- `jackcess-4.0.5.jar` — https://jackcess.sourceforge.io/ (Maven: `com.healthmarketscience.jackcess:jackcess:4.0.5`)
+- `commons-lang3-3.12.0.jar` — `org.apache.commons:commons-lang3:3.12.0`
+- `commons-logging-1.2.jar` — `commons-logging:commons-logging:1.2`
+
+These JARs and the compiled `*.class` files are **git-ignored** (vendored
+binaries, not source). To restore: download the three JARs from Maven Central
+into `core/lib_accdb/`, then `javac -cp "core/lib_accdb/*" core/lib_accdb/*.java`.
+
 ---
 
 ## Game keys
