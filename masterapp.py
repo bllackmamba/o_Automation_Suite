@@ -5230,6 +5230,84 @@ elif page == "🖥️ Container Dashboards":
 
     st.markdown("---")
 
+    # ── Per-Row CVI Match — every CVI row vs full Main Data (Step 4) ──────
+    st.markdown("#### 🎯 Per-Row CVI Match")
+    st.caption(
+        "Each CVI row's own numbers matched against every Main Data row "
+        "independently — no staging, no carry-forward. Output columns: "
+        "Row, Row_ID, Source, Set_Label, Row_Length, Main_Count, Main_Breakdown.")
+
+    _PRM_LIVE_CAP = 2000   # CVIs larger than this run detached (never freeze UI)
+    if cvi_df.empty or main_df.empty:
+        st.info("Load both a CVI and Main Data above to enable per-row match.")
+    else:
+        _prm_pool = int(_gcfg["pool"])
+        _prm_ncols = [c for c in main_df.columns
+                      if re.match(r'^n?\d+$', str(c), re.I)]
+        if not _prm_ncols:
+            _prm_ncols = [c for c in main_df.columns
+                          if pd.api.types.is_numeric_dtype(main_df[c])]
+        _prm_rows = len(cvi_df)
+        _prm_root = _gdirs["Game"].parent.parent
+        st.caption(
+            f"CVI rows: **{_prm_rows:,}** · Main Data: **{len(main_df):,}** rows "
+            f"× {len(_prm_ncols)} number-cols · pool 1–{_prm_pool} · "
+            f"live-compute cap {_PRM_LIVE_CAP:,} rows")
+
+        if not _prm_ncols:
+            st.error("Could not detect Main Data number columns.")
+        elif _prm_rows <= _PRM_LIVE_CAP:
+            _prm_est = _prm_rows * 0.08
+            if st.button(
+                    f"🎯 Compute per-row match now ({_prm_rows:,} rows, "
+                    f"~{_prm_est:.0f}s)",
+                    key=f"prm_run_{db}", type="primary"):
+                # main_arr WITHOUT np.clip — out-of-range values become 0 and are
+                # excluded from matching, never fabricated into a matchable ball.
+                _prm_raw = (main_df[_prm_ncols].apply(pd.to_numeric, errors="coerce")
+                            .to_numpy(dtype=np.float64))
+                _prm_raw = np.nan_to_num(_prm_raw, nan=0.0)
+                _prm_arr = np.where((_prm_raw >= 1) & (_prm_raw <= _prm_pool),
+                                    _prm_raw, 0).astype(np.int32)
+                with st.spinner(f"Matching {_prm_rows:,} rows against "
+                                f"{len(main_df):,} Main Data rows…"):
+                    _prm_res = _match_cvi_rows(cvi_df, _prm_arr, pool_max=_prm_pool)
+                st.success(f"✅ Matched {len(_prm_res):,} rows.")
+                show_paginated_df(_prm_res.head(200), key=f"prm_res_{db}",
+                                  use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇ Download per-row match CSV",
+                    to_csv_bytes(_prm_res),
+                    f"CVI_per_row_match_{_gkey}_{formula_name}.csv",
+                    "text/csv", key=f"prm_dl_{db}")
+        else:
+            st.warning(
+                f"CVI has {_prm_rows:,} rows (> {_PRM_LIVE_CAP:,}). A live run "
+                f"(~{_prm_rows * 0.08 / 60:.0f} min) would freeze the UI — run it "
+                "detached so it survives the shell closing:")
+            st.code(
+                f"cd {_prm_root}\n"
+                f"nohup python3 scripts/per_row_cvi_match.py {_gkey} {formula_name} "
+                f"> per_row_match_{_gkey}_{formula_name}.log 2>&1 & disown",
+                language="bash")
+            _prm_cands = [
+                _prm_root / f"CVI_per_row_match_{_gkey}_{formula_name}_FULL.csv",
+                _prm_root / f"CVI_per_row_match_{_gkey}_FULL.csv",   # legacy name
+            ]
+            _prm_hit = next((p for p in _prm_cands if p.exists()), None)
+            if _prm_hit is not None:
+                st.download_button(
+                    f"⬇ Download precomputed {_prm_hit.name} "
+                    f"({_prm_hit.stat().st_size / 1e6:.1f} MB)",
+                    data=_prm_hit.read_bytes(),
+                    file_name=_prm_hit.name, mime="text/csv",
+                    key=f"prm_dl_pre_{db}")
+            else:
+                st.caption("No precomputed result found yet — run the command "
+                           "above, then reopen this dashboard.")
+
+    st.markdown("---")
+
     # ── Data Status + Re-upload (always visible, always replaceable) ──────
     st.markdown("#### Data Status")
     col_s1, col_s2 = st.columns(2)
