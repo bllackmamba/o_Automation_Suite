@@ -234,7 +234,8 @@ from syndicate_core.matching import *
 from syndicate_core.generators import *
 from syndicate_core.collation import *
 from syndicate_core.b_sync import *
-from syndicate_core.scanners import parse_cvi_filename, cvi_date_from_mtime
+from syndicate_core.scanners import (
+    parse_cvi_filename, cvi_date_from_mtime, resolve_main_data_choices)
 
 SCRAPE_URL = "https://www.thelott.com/syndicates?postcode={pc}"
 SCRAPE_URL_WA = "https://www.lotterywest.wa.gov.au/play-online/syndicate-games?postcode={pc}"
@@ -4933,9 +4934,17 @@ elif page == "🖥️ Container Dashboards":
                                       datetime.now().strftime("%Y_%m_%d"),
                                       key="par_date")
 
-    # Auto-scan Main Data
+    # Auto-scan Main Data. The strict filename scan only sees
+    # {cluster}_{lotto}_D{draw}.csv names; fall back to the session-loaded Main
+    # Data (the Preview panel's own source) when the scan finds nothing, so the
+    # banner below can't false-negative on an off-convention but loaded file.
     matching_main = [f for f in all_main_files
                      if f.get("lotto") == lotto_sel or not f.get("lotto")]
+    matching_main = resolve_main_data_choices(
+        matching_main,
+        gs("main_data_path", ""),
+        len(gs("main_data", pd.DataFrame())),
+    )
     if matching_main:
         main_choice = st.selectbox(
             "Main Data file (auto-scanned from Main_Data/):",
@@ -4971,7 +4980,9 @@ elif page == "🖥️ Container Dashboards":
     )
 
     if run_all_btn and main_choice and matching_cvi:
-        main_path  = _gdirs["Main_Data"] / main_choice
+        # Use the chosen file's real path (may be a session-loaded file that
+        # lives outside _gdirs["Main_Data"]) rather than rebuilding from name.
+        main_path  = Path(chosen_main_info["path"])
         output_dir = _gdirs["Outputs"] / f"Cluster_{next_id}_{cluster_label}"
         output_dir.mkdir(parents=True, exist_ok=True)
 

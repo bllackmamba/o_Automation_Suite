@@ -6,6 +6,7 @@ import pytest
 from syndicate_core.scanners import (
     parse_cvi_filename,
     cvi_date_from_mtime,
+    resolve_main_data_choices,
 )
 
 
@@ -44,3 +45,33 @@ def test_parse_cvi_non_cvi_name_is_blank():
 def test_cvi_date_from_mtime_formats_iso_date():
     ts = datetime(2026, 7, 1, 13, 30).timestamp()
     assert cvi_date_from_mtime(ts) == "2026-07-01"
+
+
+# ── A1: Main Data banner must agree with the Preview panel's data source ─────
+
+def test_resolve_prefers_strict_scan_when_present():
+    scanned = [{"raw": "1n_oz_D1567.csv", "path": "/x/1n_oz_D1567.csv",
+                "rows": 10, "lotto": "oz", "draw": "D1567"}]
+    # When the strict scan finds files, they win; session state is not consulted.
+    assert resolve_main_data_choices(scanned, "/other/loaded.csv", 8_145_059) == scanned
+
+
+def test_resolve_falls_back_to_session_when_scan_empty():
+    # The reported bug: strict scan finds nothing (off-convention filename) but
+    # the Preview panel has 8.1M rows loaded -> banner must NOT show.
+    out = resolve_main_data_choices([], "/games/SAT/Main_Data/maindata.csv", 8_145_059)
+    assert len(out) == 1
+    assert out[0]["raw"] == "maindata.csv"
+    assert out[0]["path"] == "/games/SAT/Main_Data/maindata.csv"
+    assert out[0]["rows"] == 8_145_059
+
+
+def test_resolve_empty_when_genuinely_no_main_data():
+    # Banner SHOULD still fire when nothing is scanned and nothing is loaded.
+    assert resolve_main_data_choices([], "", 0) == []
+
+
+def test_resolve_no_session_path_does_not_fabricate_choice():
+    # In-memory upload (rows loaded but no on-disk path) can't feed the
+    # file-based parallel runner -> treat as absent, banner shows.
+    assert resolve_main_data_choices([], "", 8_145_059) == []

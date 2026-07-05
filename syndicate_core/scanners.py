@@ -47,3 +47,31 @@ def parse_cvi_filename(fname: str) -> dict:
 def cvi_date_from_mtime(mtime: float) -> str:
     """Format a file mtime (epoch seconds) as ``YYYY-MM-DD`` for the Date column."""
     return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+
+
+def resolve_main_data_choices(scanned: list[dict],
+                              session_path: str,
+                              session_rows: int) -> list[dict]:
+    """
+    Decide which Main Data files the parallel runner should offer.
+
+    ``scan_main_data_files`` only recognises the strict
+    ``{cluster}_{lotto}_D{draw}.csv`` convention. Main Data loaded through the
+    permissive uploader/scan (any ``*.csv`` saved to Main_Data/) lives in
+    session state and is invisible to that strict scan — which produced a false
+    "No Main Data files found" banner even while the Preview panel showed the
+    file loaded (e.g. 8,145,059 rows).
+
+    When the strict scan finds nothing but session state holds loaded rows with
+    a real on-disk path, surface that file so the banner only fires when Main
+    Data is genuinely absent (empty scan AND nothing loaded). An in-memory
+    upload with no path can't feed the file-based parallel runner, so it is
+    treated as absent.
+    """
+    if scanned:
+        return list(scanned)
+    if session_rows > 0 and session_path:
+        p = Path(session_path)
+        return [{"raw": p.name, "path": str(p), "rows": session_rows,
+                 "lotto": "", "draw": "D?"}]
+    return []
