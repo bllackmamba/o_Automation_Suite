@@ -75,3 +75,26 @@ def test_resolve_no_session_path_does_not_fabricate_choice():
     # In-memory upload (rows loaded but no on-disk path) can't feed the
     # file-based parallel runner -> treat as absent, banner shows.
     assert resolve_main_data_choices([], "", 8_145_059) == []
+
+
+def test_resolve_always_yields_path_key_regardless_of_branch():
+    # RUN ALL does Path(chosen_main_info["path"]); every dict resolve returns
+    # must carry a populated "path" no matter which branch produced it, or the
+    # ordinary strict-scan case would KeyError.
+    #
+    # Strict-scan branch: fixtures mirror scan_main_data_files() output, which
+    # sets info["path"] = str(fp) (masterapp.py:325) alongside raw/rows/lotto/draw.
+    scanned = [
+        {"raw": "1n_oz_D1567.csv", "path": "/g/SAT/Main_Data/1n_oz_D1567.csv",
+         "rows": 10, "lotto": "oz", "draw": "D1567"},
+        {"raw": "2n_oz_D1568.csv", "path": "/g/SAT/Main_Data/2n_oz_D1568.csv",
+         "rows": 20, "lotto": "oz", "draw": "D1568"},
+    ]
+    strict = resolve_main_data_choices(scanned, "", 0)
+    assert strict, "strict-scan branch must return the scanned files"
+    assert all(d.get("path") for d in strict)
+
+    # Session-fallback branch must also populate path.
+    fallback = resolve_main_data_choices([], "/g/SAT/Main_Data/maindata.csv", 8_145_059)
+    assert fallback, "fallback branch must surface the loaded file"
+    assert all(d.get("path") for d in fallback)
