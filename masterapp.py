@@ -234,6 +234,7 @@ from syndicate_core.matching import *
 from syndicate_core.generators import *
 from syndicate_core.collation import *
 from syndicate_core.b_sync import *
+from syndicate_core.scanners import parse_cvi_filename, cvi_date_from_mtime
 
 SCRAPE_URL = "https://www.thelott.com/syndicates?postcode={pc}"
 SCRAPE_URL_WA = "https://www.lotterywest.wa.gov.au/play-online/syndicate-games?postcode={pc}"
@@ -274,21 +275,6 @@ def parse_main_filename(fname: str) -> dict:
     elif len(parts) == 2:
         result["lotto"]  = parts[0]
         result["draw"]   = parts[1]
-    return result
-
-
-def parse_cvi_filename(fname: str) -> dict:
-    """
-    Parse `CVI_{lotto_type}_{formula}_{date}.csv`
-    e.g. `CVI_oz_BRD_2026_05_28.csv`
-    """
-    stem  = Path(fname).stem
-    parts = stem.split("_")
-    result = {"lotto": "", "formula": "", "date": "", "raw": fname}
-    if len(parts) >= 3 and parts[0] == "CVI":
-        result["lotto"]   = parts[1]
-        result["formula"] = parts[2]
-        result["date"]    = "_".join(parts[3:])
     return result
 
 
@@ -346,10 +332,17 @@ def scan_main_data_files() -> list[dict]:
 
 
 def scan_cvi_files(lotto_type: str = "") -> list[dict]:
-    """Scan the active game's container_variable_inputs_{game}/ for CVI files."""
+    """Scan the active game's Container_Variable_Inputs_{game}/ for CVI files."""
     files = []
     for fp in sorted(active_game_dirs()["CVI"].glob("CVI_*.csv")):
         info = parse_cvi_filename(fp.name)
+        # Current CVI names (`CVI_{formula}.csv`) carry no embedded date — fill
+        # the table's Date column from the file's mtime instead of leaving blank.
+        if not info["date"]:
+            try:
+                info["date"] = cvi_date_from_mtime(fp.stat().st_mtime)
+            except OSError:
+                info["date"] = ""
         if not lotto_type or info["lotto"] == lotto_type:
             info["path"] = str(fp)
             files.append(info)
