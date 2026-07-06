@@ -728,76 +728,6 @@ def to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
 
 
-def to_styled_excel(df: pd.DataFrame, cvi_set: set,
-                    n_cols: list, sheet_name: str = "Data") -> bytes:
-    """
-    Export DataFrame to Excel with highlighted cells.
-    Cells whose value is in cvi_set get a salmon/pink background.
-    Count column gets a yellow background.
-    Returns bytes suitable for st.download_button.
-    """
-    import io
-    from openpyxl import Workbook
-    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-
-    PINK   = PatternFill("solid", fgColor="FFB3B3")
-    YELLOW = PatternFill("solid", fgColor="FFFF99")
-    GREY   = PatternFill("solid", fgColor="D9D9D9")
-    thin   = Border(
-        left=Side(style="thin"), right=Side(style="thin"),
-        top=Side(style="thin"),  bottom=Side(style="thin")
-    )
-
-    EXCEL_ROW_LIMIT = 1_048_575  # Excel max rows minus header
-    truncated = False
-    if len(df) > EXCEL_ROW_LIMIT:
-        df = df.iloc[:EXCEL_ROW_LIMIT].copy()
-        truncated = True
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = sheet_name[:31]
-
-    cols = list(df.columns)
-    # Header row
-    for ci, col in enumerate(cols, 1):
-        cell = ws.cell(row=1, column=ci, value=str(col))
-        cell.fill = GREY
-        cell.font = Font(bold=True)
-        cell.alignment = Alignment(horizontal="center", wrap_text=True)
-        cell.border = thin
-        ws.column_dimensions[cell.column_letter].width = 8
-
-    if truncated:
-        # Write a notice row beneath the header
-        ws.insert_rows(2)
-        notice_cell = ws.cell(row=2, column=1,
-                              value=f"⚠ Truncated to {EXCEL_ROW_LIMIT:,} rows "
-                                    f"(Excel limit). Full data available as CSV.")
-        notice_cell.font = Font(bold=True, color="FF0000")
-
-    # Data rows (start at row 3 if truncated notice inserted, else row 2)
-    row_offset = 3 if truncated else 2
-    for ri, (_, row) in enumerate(df.iterrows(), row_offset):
-        for ci, col in enumerate(cols, 1):
-            val = row[col]
-            cell = ws.cell(row=ri, column=ci,
-                           value=None if pd.isna(val) else val)
-            cell.alignment = Alignment(horizontal="center")
-            cell.border = thin
-            if col == "Count":
-                cell.fill = YELLOW
-            elif col in n_cols:
-                try:
-                    if int(round(float(val))) in cvi_set:
-                        cell.fill = PINK
-                except (ValueError, TypeError):
-                    pass
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5. HIGH-PERFORMANCE MATCHING ENGINE (numpy vectorised, chunked, parallel)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -5159,7 +5089,7 @@ elif page == "🖥️ Container Dashboards":
 
     with pv2:
         if sc_auto:
-            st.success(f"✅ **SC** — {len(sc_auto)} w-columns")
+            st.success(f"✅ **SC** — {len(sc_auto)} rows")
             with st.expander("Preview SC"):
                 show_paginated_df(pd.DataFrame([
                     {"w": k, "SC": v} for k,v in sc_auto.items()
@@ -5386,35 +5316,35 @@ elif page == "🖥️ Container Dashboards":
     # Selected Count
     st.markdown("**Selected Count input**")
 
-    # Show if auto-loaded from file
+    # Show if auto-loaded from file. The raw per-column SC grid is detail, not
+    # always-on content, so it sits behind a single chevron (it was previously
+    # rendered twice, permanently — once here and again beside the Method
+    # buttons; both printed identical data from sc_auto, so they're merged).
     if sc_auto:
         st.success(f"✅ Selected Counts loaded from SC_{formula_name}*.csv")
-        st.caption("  |  ".join(f"{k}={v}" for k,v in sc_auto.items()))
+        with st.expander("Per-column SC values (from file)"):
+            st.caption("  |  ".join(f"{k}={v}" for k,v in sc_auto.items()))
 
-    # SC upload — always replaceable
-    with st.expander("📂 Upload / Replace Selected Count file"):
-        st.caption("File must have columns: w, Selected Count")
-        upload_key_sc = f"up_sc_{db}_{S.get('sc_upload_v', {}).get(db, 0)}"
-        up_sc = st.file_uploader("Upload SC file (CSV, Excel, HTML, JSON, …)",
-                                  type=_UPLOAD_TYPES, key=upload_key_sc)
-        if up_sc:
-            df_sc_up = _read_uploaded(up_sc)
-            sp_sc = _gdirs["Selected_Counts"] / f"SC_{formula_name}.csv"
-            df_sc_up.to_csv(sp_sc, index=False)
-            if "sc_upload_v" not in S: S["sc_upload_v"] = {}
-            S["sc_upload_v"][db] = S["sc_upload_v"].get(db, 0) + 1
-            st.success(f"✅ Saved → SC_{formula_name}.csv")
-            st.rerun()
+    # SC upload — permanently visible (same altitude as the Method buttons)
+    st.markdown("**📂 Upload / Replace Selected Count file**")
+    st.caption("File must have columns: w, Selected Count")
+    upload_key_sc = f"up_sc_{db}_{S.get('sc_upload_v', {}).get(db, 0)}"
+    up_sc = st.file_uploader("Upload SC file (CSV, Excel, HTML, JSON, …)",
+                              type=_UPLOAD_TYPES, key=upload_key_sc)
+    if up_sc:
+        df_sc_up = _read_uploaded(up_sc)
+        sp_sc = _gdirs["Selected_Counts"] / f"SC_{formula_name}.csv"
+        df_sc_up.to_csv(sp_sc, index=False)
+        if "sc_upload_v" not in S: S["sc_upload_v"] = {}
+        S["sc_upload_v"][db] = S["sc_upload_v"].get(db, 0) + 1
+        st.success(f"✅ Saved → SC_{formula_name}.csv")
+        st.rerun()
 
     c1,c2 = st.columns(2)
     with c1:
         sc_method = st.radio("Method:", ["Custom","Same for all","Range"],
                              horizontal=True, key=f"scm_{db}")
     with c2:
-        # Show per-column summary — do NOT merge into one string
-        if sc_auto:
-            st.caption("Per-column SC (from file): " +
-                       "  |  ".join(f"{k}={v}" for k,v in sc_auto.items()))
         fallback_sc = st.text_input(
             "Count value (for “Same for all” / “Range” methods):", "7",
             key=f"scr_{db}",
@@ -5480,58 +5410,28 @@ elif page == "🖥️ Container Dashboards":
         key=lambda x: int(x[1:])
     )
 
-    # ── Compact carry-forward control ─────────────────────────────────────
-    # Global default + per-row overrides via a single editable table.
-    # No per-column button grid — works cleanly with any number of w-columns.
-    gd1, gd2, gd3 = st.columns([1.5, 1.5, 5])
-    with gd1:
-        global_dir = st.selectbox(
-            "Default direction:",
-            ["U — Unselected", "S — Selected"],
-            key=f"gdir_{db}",
-            help="Sets carry-forward direction for ALL rows at once."
-        )
-        _gd = "U" if global_dir.startswith("U") else "S"
-    with gd2:
-        if st.button("Apply to all", key=f"gdir_apply_{db}",
-                     use_container_width=True):
-            for wk in w_keys_cf:
-                S[cf_key][wk] = _gd
-            st.rerun()
-    with gd3:
-        st.caption(
-            f"{len(w_keys_cf)} w-columns loaded. "
-            "Edit the Direction column in the table below to override individual rows. "
-            "U = Unselected carries forward · S = Selected carries forward."
-        )
+    # ── Carry-forward default (Part B) ────────────────────────────────────
+    # Single pre-run default used by Auto mode. Manual-mode per-row direction
+    # is set through the Matching Table's Dir chevron (which writes
+    # S[cf_key][w]); this dropdown is the fallback for any row not overridden.
+    global_dir = st.selectbox(
+        "Default direction:",
+        ["U — Unselected", "S — Selected"],
+        key=f"gdir_{db}",
+        help="Pre-run default carry-forward for every row (Auto mode). "
+             "Override an individual row from its Dir chevron in the "
+             "Matching Table."
+    )
+    _gd = "U" if global_dir.startswith("U") else "S"
+    st.caption(
+        f"{len(w_keys_cf)} w-columns loaded · default **{_gd}** "
+        f"({'Unselected' if _gd == 'U' else 'Selected'} carries forward). "
+        "Override a single row via its Dir chevron in the Matching Table."
+    )
 
-    if w_keys_cf:
-        # Build override table: one row per w-column
-        _cf_rows = [{"Row": f"Row {int(wk[1:])}  ·  {wk}",
-                     "Direction": S[cf_key].get(wk, "U")}
-                    for wk in w_keys_cf]
-        _cf_edit_df = pd.DataFrame(_cf_rows)
-        _cf_edited = st.data_editor(
-            _cf_edit_df,
-            key=f"cf_tbl_{db}",
-            use_container_width=True,
-            num_rows="fixed",
-            height=min(40 * len(w_keys_cf) + 50, 340),
-            column_config={
-                "Row":       st.column_config.TextColumn("Row", disabled=True,
-                                                          width="medium"),
-                "Direction": st.column_config.SelectboxColumn(
-                                 "Direction", options=["U", "S"], width="small"),
-            },
-            hide_index=True,
-        )
-        # Persist edits back into session state
-        for _idx, _row in _cf_edited.iterrows():
-            _wk = w_keys_cf[_idx]
-            S[cf_key][_wk] = _row["Direction"]
-
-    # Build final carry_fwd dict (defaults to U)
-    carry_fwd = {wk: S[cf_key].get(wk, "U") for wk in w_keys_cf}
+    # Build final carry_fwd dict: the pre-run default, plus any per-row
+    # overrides captured from the Matching Table's Dir chevron.
+    carry_fwd = {wk: S[cf_key].get(wk, _gd) for wk in w_keys_cf}
 
     # ── Pace control state (Part B) — pace is independent of SC source ────
     # Auto = run every w_row straight through; Manual = pause at each w_row.
@@ -5767,60 +5667,10 @@ elif page == "🖥️ Container Dashboards":
         fig9  = res["fig9_table"]
         sel   = res["selected"]
         unsel = res["unselected"]
-        bd    = res["breakdown"]
         dbg   = res.get("debug_rows", [])
-        small = res.get("small_enough", True)
-        n_cols_res = res.get("n_cols", [])
 
         st.success(f"✅ Final stage — Selected: {len(sel):,}  ·  "
                    f"Unselected: {len(unsel):,}")
-
-        # ── Helper: show df with count filter + highlights inline ──────
-        def show_filtered_highlighted(df_in, cvi_set_in, n_cols_in,
-                                      section_key, default_counts=None):
-            if df_in is None or df_in.empty:
-                st.info("No data.")
-                return
-            count_col = "Count" if "Count" in df_in.columns else None
-            avail_counts = []
-            if count_col:
-                avail_counts = sorted(df_in[count_col].dropna()
-                                      .astype(int).unique().tolist())
-            if avail_counts:
-                filt = st.multiselect(
-                    "Filter by count:", avail_counts,
-                    default=default_counts or avail_counts,
-                    key=f"flt_{db}_{section_key}"
-                )
-                df_show = df_in[df_in[count_col].isin(filt)] if filt else df_in
-            else:
-                df_show = df_in
-            if df_show.empty:
-                st.info("No rows match the selected count filter.")
-                return
-            # Highlight matching cells
-            nc = [c for c in n_cols_in if c in df_show.columns]
-            if nc and cvi_set_in:
-                def _style(val):
-                    try:
-                        if int(round(float(val))) in cvi_set_in:
-                            return ("background-color:#d4a0a0;"
-                                    "color:#000;font-weight:bold")
-                    except (ValueError, TypeError):
-                        pass
-                    return ""
-                def _cnt_style(val):
-                    return "background-color:#ffffaa;color:#000;font-weight:bold"
-                try:
-                    styled = df_show.style.applymap(_style, subset=nc)
-                    if count_col:
-                        styled = styled.applymap(_cnt_style,
-                                                 subset=[count_col])
-                    show_paginated_df(styled, key="cd_formula_result_styled", use_container_width=True, hide_index=True)
-                except Exception:
-                    show_paginated_df(df_show, key="cd_formula_result_plain", use_container_width=True, hide_index=True)
-            else:
-                show_paginated_df(df_show, key="cd_formula_result_unstyled", use_container_width=True, hide_index=True)
 
         # ── Interactive Matching Table — per-cell popover detail ──────
         st.markdown("#### Matching Table")
@@ -5877,8 +5727,25 @@ elif page == "🖥️ Container Dashboards":
                                 f"({len(_cvi_set)} values):")
                     st.write(sorted(_cvi_set) if _cvi_set else "— None —")
 
-                # 3 · Dir — plain
-                _rc[3].write(_fr["Dir"])
+                # 3 · Dir — popover: carry-forward toggle (this IS the toggle,
+                #     not just a display — picking U/S rewrites the row's
+                #     direction for the next run).
+                with _rc[3].popover(_fr["Dir"], use_container_width=True):
+                    st.markdown(f"**Carry-forward direction — {_w}**")
+                    st.caption("Which pool feeds the next row.")
+                    st.write(f"**U** → Unselected carries forward "
+                             f"({_d.get('unselected_n', '—')} rows)")
+                    st.write(f"**S** → Selected carries forward "
+                             f"({_d.get('selected_n', '—')} rows)")
+                    _dir_cur = S[cf_key].get(_w, _fr["Dir"])
+                    _dir_pick = st.radio(
+                        "Direction for this row:", ["U", "S"],
+                        index=0 if _dir_cur == "U" else 1,
+                        horizontal=True, key=f"dir_tgl_{db}_{_w}",
+                    )
+                    if S[cf_key].get(_w) != _dir_pick:
+                        S[cf_key][_w] = _dir_pick
+                        st.caption("Saved — re-run matching to apply.")
 
                 # 4 · Main Count — popover → full count string
                 with _rc[4].popover(_trunc(_fr["Main\nCount"]),
@@ -5982,299 +5849,6 @@ elif page == "🖥️ Container Dashboards":
                                to_csv_bytes(fig9),
                                f"{ind_prefix}_matching_table.csv",
                                "text/csv", key=f"dl_fig9_{db}")
-
-        # ── Per-row summary table + single-row inspector ──────────────
-        # Show all rows as a compact summary table first, then let the
-        # user pick ONE row to drill into — avoids rendering hundreds of
-        # expanders at once.
-        st.markdown("#### Row-by-Row Summary")
-        _summary_rows = []
-        for _d in dbg:
-            _icon = "✅" if _d["selected_n"] > 0 else (
-                    "⚪" if _d["present_in"] == 0 else "🔵")
-            _note = f"  ⚠️{_d.get('note','')}" if _d.get("note") else ""
-            _summary_rows.append({
-                "":        _icon,
-                "Row":     int(_d["w"][1:]),
-                "w":       _d["w"],
-                "Dir":     _d.get("direction", "U"),
-                "Present": _d["present_in"],
-                "SC":      str(list(_d["sc"])),
-                "S":       _d["selected_n"],
-                "U":       _d["unselected_n"],
-                "Note":    _note.strip(),
-            })
-        if _summary_rows:
-            _sum_df = pd.DataFrame(_summary_rows)
-            show_paginated_df(_sum_df, key=f"cd_row_summary_{db}", use_container_width=True, hide_index=True)
-
-            # ── One-click export of the full summary ───────────────────
-            _bdl1, _bdl2 = st.columns(2)
-            with _bdl1:
-                st.download_button(
-                    "⬇ Download Row Summary CSV",
-                    to_csv_bytes(_sum_df.drop(columns=[""])),
-                    f"{ind_prefix}_row_summary.csv",
-                    "text/csv",
-                    key=f"dl_sum_csv_{db}",
-                    use_container_width=True,
-                )
-            with _bdl2:
-                try:
-                    import io as _sum_io
-                    _sum_buf = _sum_io.BytesIO()
-                    with pd.ExcelWriter(_sum_buf, engine="openpyxl") as _sum_xl:
-                        _export_df = _sum_df.drop(columns=[""]).copy()
-                        _export_df.to_excel(_sum_xl, sheet_name="Row_Summary",
-                                            index=False)
-                        # Conditional formatting: green S>0, grey S=0
-                        from openpyxl.styles import PatternFill as _PF, Font as _Fnt
-                        _ws = _sum_xl.sheets["Row_Summary"]
-                        _green = _PF("solid", fgColor="C6EFCE")
-                        _red   = _PF("solid", fgColor="FFC7CE")
-                        _s_col = list(_export_df.columns).index("S") + 1
-                        _u_col = list(_export_df.columns).index("U") + 1
-                        for _r in range(2, len(_export_df) + 2):
-                            _sc = _ws.cell(row=_r, column=_s_col)
-                            _uc = _ws.cell(row=_r, column=_u_col)
-                            try:
-                                if int(_sc.value or 0) > 0:
-                                    _sc.fill = _green
-                                else:
-                                    _sc.fill = _red
-                            except (ValueError, TypeError):
-                                pass
-                    _sum_buf.seek(0)
-                    st.download_button(
-                        "⬇ Download Row Summary Excel (S highlighted)",
-                        _sum_buf.getvalue(),
-                        f"{ind_prefix}_row_summary.xlsx",
-                        "application/vnd.openxmlformats-officedocument"
-                        ".spreadsheetml.sheet",
-                        key=f"dl_sum_xl_{db}",
-                        use_container_width=True,
-                    )
-                except Exception as _sum_xl_ex:
-                    st.warning(f"Excel export unavailable: {_sum_xl_ex}")
-
-        # ── Single-row inspector ───────────────────────────────────────
-        st.markdown("#### Inspect a Row")
-        _row_labels = [
-            f"Row {int(d['w'][1:])}  ·  {d['w']}  ·  "
-            f"Dir:{d.get('direction','U')}  ·  Present:{d['present_in']}  ·  "
-            f"S:{d['selected_n']}  ·  U:{d['unselected_n']}"
-            for d in dbg
-        ]
-        if _row_labels:
-            _sel_row_label = st.selectbox(
-                "Select row to inspect:",
-                _row_labels,
-                key=f"row_inspect_{db}"
-            )
-            _sel_i = _row_labels.index(_sel_row_label)
-            d = dbg[_sel_i]
-            i = _sel_i
-            w_lbl     = d["w"]
-            cvi_set_d = d.get("cvi_set", set(d.get("cvi_numbers", [])))
-            n_cols_d  = d.get("n_cols", [])
-
-            if not cvi_set_d:
-                st.warning(f"{w_lbl}: No CVI numbers — column is empty. "
-                           "All present rows carry forward.")
-            else:
-                # CVI numbers + distribution
-                cca, ccb = st.columns(2)
-                with cca:
-                    st.markdown(f"**{w_lbl} numbers ({len(cvi_set_d)}):**")
-                    st.write(sorted(cvi_set_d))
-                with ccb:
-                    st.markdown("**Count distribution (present rows):**")
-                    if d["count_dist"]:
-                        dist_df = pd.DataFrame([
-                            {"Count": int(k[1:]),
-                             "Rows": v,
-                             "": "✅ Sel" if int(k[1:]) in d["sc"]
-                                 else "— Unsel"}
-                            for k, v in sorted(d["count_dist"].items())
-                        ])
-                        show_paginated_df(dist_df, key=f"cd_dist_df_{_w}_{_ri}", hide_index=True, use_container_width=True)
-                    else:
-                        st.info("—")
-
-                st.markdown("---")
-
-                # Main Data breakdown (collapsible)
-                with st.expander(
-                    f"📊 Main Data Breakdown  ·  M:{len(main_df)}"
-                    f"  ·  {d.get('main_bd_str','—')}"
-                ):
-                    md_wc = d.get("main_df_wc")
-                    if md_wc is not None and not md_wc.empty:
-                        show_filtered_highlighted(
-                            md_wc, cvi_set_d, n_cols_d, f"main_{i}")
-                        c1e, c2e = st.columns(2)
-                        with c1e:
-                            st.download_button(
-                                "⬇ Main Breakdown CSV",
-                                to_csv_bytes(md_wc),
-                                f"{ind_prefix}_{w_lbl}_main.csv",
-                                "text/csv", key=f"dl_main_{db}_{i}")
-                        with c2e:
-                            st.download_button(
-                                "⬇ Main Breakdown Excel (highlighted)",
-                                to_styled_excel(md_wc, cvi_set_d, n_cols_d,
-                                                f"{w_lbl}_Main"),
-                                f"{ind_prefix}_{w_lbl}_main.xlsx",
-                                "application/vnd.openxmlformats-officedocument"
-                                ".spreadsheetml.sheet",
-                                key=f"dl_main_xl_{db}_{i}")
-                    else:
-                        st.info("Main data breakdown not available "
-                                f"(M>{DISPLAY_THRESHOLD:,} or no CVI).")
-
-                st.markdown("---")
-
-                # Selected + Unselected side by side (collapsible)
-                ts, tu = st.columns(2)
-                with ts:
-                    d_sel = d.get("sel_df")
-                    with st.expander(
-                        f"✅ Selected  S:{d['selected_n']}", expanded=True
-                    ):
-                        if d_sel is not None and not d_sel.empty:
-                            show_filtered_highlighted(
-                                d_sel, cvi_set_d, n_cols_d,
-                                f"sel_{i}",
-                                default_counts=list(d["sc"]))
-                            c1s, c2s = st.columns(2)
-                            with c1s:
-                                st.download_button(
-                                    f"⬇ {w_lbl} Selected CSV",
-                                    to_csv_bytes(d_sel),
-                                    f"{ind_prefix}_{w_lbl}_sel.csv",
-                                    "text/csv", key=f"dl_sel_{db}_{i}")
-                            with c2s:
-                                st.download_button(
-                                    "⬇ Excel (highlighted)",
-                                    to_styled_excel(d_sel, cvi_set_d,
-                                                    n_cols_d, f"{w_lbl}_Sel"),
-                                    f"{ind_prefix}_{w_lbl}_sel.xlsx",
-                                    "application/vnd.openxmlformats-"
-                                    "officedocument.spreadsheetml.sheet",
-                                    key=f"dl_sel_xl_{db}_{i}")
-                        elif d["selected_n"] == 0:
-                            st.info("No rows selected at this stage.")
-                        else:
-                            st.info(f"S:{d['selected_n']} — not stored "
-                                    f"(M>{DISPLAY_THRESHOLD:,})")
-
-                with tu:
-                    d_unsel = d.get("unsel_df")
-                    with st.expander(
-                        f"🔵 Unselected  U:{d['unselected_n']} → fwd",
-                        expanded=True
-                    ):
-                        if d_unsel is not None and not d_unsel.empty:
-                            show_filtered_highlighted(
-                                d_unsel, cvi_set_d, n_cols_d, f"unsel_{i}")
-                            c1u, c2u = st.columns(2)
-                            with c1u:
-                                st.download_button(
-                                    f"⬇ {w_lbl} Unselected CSV",
-                                    to_csv_bytes(d_unsel),
-                                    f"{ind_prefix}_{w_lbl}_unsel.csv",
-                                    "text/csv", key=f"dl_unsel_{db}_{i}")
-                            with c2u:
-                                st.download_button(
-                                    "⬇ Excel (highlighted)",
-                                    to_styled_excel(d_unsel, cvi_set_d,
-                                                    n_cols_d, f"{w_lbl}_Unsel"),
-                                    f"{ind_prefix}_{w_lbl}_unsel.xlsx",
-                                    "application/vnd.openxmlformats-"
-                                    "officedocument.spreadsheetml.sheet",
-                                    key=f"dl_unsel_xl_{db}_{i}")
-                        elif d["unselected_n"] == 0:
-                            st.info("No rows remaining.")
-                        else:
-                            st.info(f"U:{d['unselected_n']} — not stored "
-                                    f"(M>{DISPLAY_THRESHOLD:,})")
-
-        # ── Final stage permanent tabs ─────────────────────────────────
-        st.markdown("---")
-        st.markdown("#### Final Stage Output")
-
-        # Get final w CVI set
-        final_cvi_set = set()
-        if dbg:
-            last_d = next((d for d in reversed(dbg)
-                           if d.get("cvi_set")), None)
-            if last_d:
-                final_cvi_set = last_d.get("cvi_set", set())
-
-        ft1, ft2, ft3 = st.tabs([
-            f"Selected (final)  S:{len(sel)}",
-            f"Unselected (final)  U:{len(unsel)}",
-            "Breakdown S0/S1/S2… (all stages)",
-        ])
-
-        with ft1:
-            if sel.empty:
-                st.info("No rows selected at final stage.")
-            else:
-                n_f = [c for c in n_cols_res if c in sel.columns]
-                show_filtered_highlighted(
-                    sel, final_cvi_set, n_f, "final_sel",
-                    default_counts=None)
-                fpath = _gdirs["Outputs"] / f"{ind_prefix}_selected.csv"
-                sel.to_csv(fpath, index=False)
-                c1f, c2f = st.columns(2)
-                with c1f:
-                    st.download_button(
-                        "⬇ Selected CSV", to_csv_bytes(sel),
-                        f"{ind_prefix}_selected.csv","text/csv",
-                        key=f"dl_s_{db}")
-                with c2f:
-                    st.download_button(
-                        "⬇ Selected Excel (highlighted)",
-                        to_styled_excel(sel, final_cvi_set, n_f, "Selected"),
-                        f"{ind_prefix}_selected.xlsx",
-                        "application/vnd.openxmlformats-officedocument"
-                        ".spreadsheetml.sheet",
-                        key=f"dl_s_xl_{db}")
-
-        with ft2:
-            if unsel.empty:
-                st.info("No rows remaining at final stage.")
-            else:
-                n_u = [c for c in n_cols_res if c in unsel.columns]
-                show_filtered_highlighted(
-                    unsel, final_cvi_set, n_u, "final_unsel")
-                c1u2, c2u2 = st.columns(2)
-                with c1u2:
-                    st.download_button(
-                        "⬇ Unselected CSV", to_csv_bytes(unsel),
-                        f"{ind_prefix}_unselected.csv","text/csv",
-                        key=f"dl_u_{db}")
-                with c2u2:
-                    st.download_button(
-                        "⬇ Unselected Excel (highlighted)",
-                        to_styled_excel(unsel, final_cvi_set, n_u,
-                                        "Unselected"),
-                        f"{ind_prefix}_unselected.xlsx",
-                        "application/vnd.openxmlformats-officedocument"
-                        ".spreadsheetml.sheet",
-                        key=f"dl_u_xl_{db}")
-
-        with ft3:
-            st.caption("S0=0 matches · S1=1 match … per w-column")
-            if bd.empty:
-                st.info("No breakdown data.")
-            else:
-                show_paginated_df(bd, key=f"cd_breakdown_{db}", use_container_width=True, hide_index=True)
-                st.download_button(
-                    "⬇ Breakdown CSV", to_csv_bytes(bd),
-                    f"{ind_prefix}_breakdown.csv","text/csv",
-                    key=f"dl_bd_{db}")
 
     # Controls
     st.markdown("---")
