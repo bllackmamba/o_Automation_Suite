@@ -5424,7 +5424,7 @@ elif page == "🖥️ Container Dashboards":
     )
     _gd = "U" if global_dir.startswith("U") else "S"
     st.caption(
-        f"{len(w_keys_cf)} w-columns loaded · default **{_gd}** "
+        f"{len(w_keys_cf)} w_rows loaded · default **{_gd}** "
         f"({'Unselected' if _gd == 'U' else 'Selected'} carries forward). "
         "Override a single row via its Dir chevron in the Matching Table."
     )
