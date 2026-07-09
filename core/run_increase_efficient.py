@@ -37,10 +37,12 @@ CORE = Path(__file__).resolve().parent
 CHUNK = 100_000           # rows buffered before flush to disk
 PROGRESS_EVERY = 1_000_000  # candidate NLists between progress prints
 
-# key -> (filename, has_header, n, target)
+# key -> (filename relative to CORE, has_header, n, target)
+# Input CSVs were moved into core/combi/ during Tai's manual reorg; output
+# CSVs still land in CORE via path.stem (e.g. c545_grouped.csv).
 CONFIGS = {
-    "c545": ("c545.csv", True, 5, 6),
-    "sat": ("Main_Data_sat.csv", False, 6, 7),
+    "c545": ("combi/c545.csv", True, 5, 6),
+    "sat": ("combi/Main_Data_sat.csv", False, 6, 7),
 }
 
 
