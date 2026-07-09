@@ -93,3 +93,8 @@ core/increase.py
 #   git add -f Variables/Variable_Elements/Base/f_rules_Gclaude.xlsx
 # (In GitHub Desktop: it appears under "ignored" — right-click to include.)
 # ───────────────────────────────────────────────────────────────
+
+# Verified diff>1 increase NList results (consuming definition): track only the
+# per-case NList CSVs. The bulky main_data_*_plus.csv aggregations and any other
+# blocks under core/increaseW_results/ stay ignored via *.csv above.
+!core/increaseW_results/**/nlists_*.csv
