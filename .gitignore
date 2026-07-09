@@ -98,3 +98,8 @@ core/increase.py
 # per-case NList CSVs. The bulky main_data_*_plus.csv aggregations and any other
 # blocks under core/increaseW_results/ stay ignored via *.csv above.
 !core/increaseW_results/**/nlists_*.csv
+# ...but NOT the large derived union files (regenerable; oz's is 112MB > GitHub 100MB).
+# This re-ignore must stay AFTER the nlists_*.csv negation above (last match wins).
+core/increaseW_results/**/nlists_*_deduped_union.csv
+# Track the small per-game duplicate reports (analysis artifacts, all < 8MB).
+!core/increaseW_results/**/duplicate_report_*.csv
