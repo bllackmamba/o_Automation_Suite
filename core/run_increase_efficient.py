@@ -46,9 +46,24 @@ CONFIGS = {
 
 # ───────────────────────────────────────── core algorithm ─────────────────
 
+def subsets_of_width(combo: tuple[int, ...], k: int) -> list[tuple[int, ...]]:
+    """All width-k subsets of a sorted tuple, in lexicographic order."""
+    return list(itertools.combinations(combo, k))
+
+
 def subsets_missing_one(combo: tuple[int, ...]) -> list[tuple[int, ...]]:
-    """All (len-1)-subsets of a sorted tuple, in lexicographic order."""
+    """All (len-1)-subsets of a sorted tuple, in lexicographic order.
+    This is the diff=1 child set (kept as-is so the diff=1 path is unchanged)."""
     return [combo[:i] + combo[i + 1:] for i in range(len(combo))]
+
+
+def _children(cand: tuple[int, ...], k: int, diff: int) -> list[tuple[int, ...]]:
+    """Potential input-row children of a candidate NList: its width-k subsets
+    (k = target - diff = input row width n). diff=1 keeps the legacy
+    (len-1)-subset path byte-for-byte; diff>1 uses general width-k subsets."""
+    if diff == 1:
+        return subsets_missing_one(cand)
+    return subsets_of_width(cand, k)
 
 
 def run_increase(
@@ -63,7 +78,17 @@ def run_increase(
     Deterministic Step 1-4. `rows` is the set of input combos (each a sorted
     n-tuple). Returns (nlists, remnant). For each formed group, `on_group(nlist,
     children)` is called as a streaming sink (children are sorted n-tuples).
+
+    Consuming definition (diff = target - n): scan every candidate of the full
+    C(pool, target) space in lexicographic order; accept iff its count of
+    STILL-UNCONSUMED width-n children is > diff; consume those children (each
+    input row corroborates exactly one NList). diff=1 reduces to the original
+    ">= 2 (target-1)-subset children" rule.
     """
+    diff = target - n
+    if diff < 1:
+        raise ValueError(f"target ({target}) must exceed input width n ({n})")
+    k = n  # child width = target - diff = n
     pool = sorted({v for r in rows for v in r})
     assigned: set[tuple[int, ...]] = set()
     nlists: list[tuple[int, ...]] = []
@@ -74,9 +99,9 @@ def run_increase(
         if on_progress is not None and seen % PROGRESS_EVERY == 0:
             on_progress(seen, len(nlists), len(assigned))
 
-        kids = [s for s in subsets_missing_one(cand)
+        kids = [s for s in _children(cand, k, diff)
                 if s in rows and s not in assigned]
-        if len(kids) >= 2:
+        if len(kids) > diff:
             assigned.update(kids)
             nlists.append(cand)
             if on_group is not None:
@@ -90,30 +115,38 @@ def run_increase(
 
 def run_increase_reference(rows, n, target):
     """
-    Brute pair-based Step 1-3 straight off the spec, used only to validate
-    run_increase() on small inputs. Builds the (n-1)-subset index, derives
-    candidates from row pairs, then assigns lexicographically.
+    Independent reference for validating run_increase() on small inputs.
+
+    Candidate generation differs from the efficient scan (full-pool lex sweep):
+    here every candidate is built by child-extension — take a present input row
+    (a width-n child) and add `diff` further pool values to reach width `target`.
+    This enumerates every target-set that is a superset of at least one present
+    child, i.e. every candidate that could possibly be accepted (an accepted
+    candidate has > diff >= 1 present children, so it is generated from each of
+    them). Candidates the efficient scan also visits but this omits have zero
+    present children and are always rejected, so the accepted sequence, group
+    sizes, and remnant are identical. Assignment is the same lexicographic,
+    first-come consuming rule. Generalises to arbitrary diff >= 1.
     """
-    index: dict[tuple[int, ...], list[tuple[int, ...]]] = {}
-    for r in rows:
-        for s in subsets_missing_one(r):
-            index.setdefault(s, []).append(r)
+    diff = target - n
+    k = n
+    pool = sorted({v for r in rows for v in r})
 
     candidates: set[tuple[int, ...]] = set()
-    for members in index.values():
-        if len(members) >= 2:
-            for a, b in itertools.combinations(members, 2):
-                u = tuple(sorted(set(a) | set(b)))
-                if len(u) == target:
-                    candidates.add(u)
+    for r in rows:
+        rset = set(r)
+        for extra in itertools.combinations(pool, diff):
+            u = rset | set(extra)
+            if len(u) == target:
+                candidates.add(tuple(sorted(u)))
 
     assigned: set[tuple[int, ...]] = set()
     nlists: list[tuple[int, ...]] = []
     groups: dict[tuple[int, ...], list[tuple[int, ...]]] = {}
     for cand in sorted(candidates):
-        kids = [s for s in subsets_missing_one(cand)
+        kids = [s for s in _children(cand, k, diff)
                 if s in rows and s not in assigned]
-        if len(kids) >= 2:
+        if len(kids) > diff:
             assigned.update(kids)
             nlists.append(cand)
             groups[cand] = kids
@@ -124,39 +157,45 @@ def run_increase_reference(rows, n, target):
 # ───────────────────────────────────────── self-test ──────────────────────
 
 def selftest() -> None:
-    print("self-test: fused-lex vs brute pair reference + invariants")
+    print("self-test: efficient vs independent reference + invariants (diff=1,2,3)")
     rng = random.Random(12345)
-    for trial in range(200):
-        n = rng.choice([3, 4, 5])
-        pool_size = rng.randint(n + 1, n + 5)
-        pool = list(range(1, pool_size + 1))
-        target = n + 1
-        all_combos = list(itertools.combinations(pool, n))
-        k = rng.randint(2, len(all_combos))
-        rows = set(rng.sample(all_combos, k))
+    total = 0
+    for diff in (1, 2, 3):
+        for trial in range(120):
+            # keep pools small so the reference's child-extension stays cheap
+            n = rng.choice([3, 4, 5]) if diff == 1 else rng.choice([2, 3, 4])
+            target = n + diff
+            pool_size = rng.randint(target, target + 4)  # pool must be >= target
+            pool = list(range(1, pool_size + 1))
+            all_combos = list(itertools.combinations(pool, n))
+            k = rng.randint(2, len(all_combos))
+            rows = set(rng.sample(all_combos, k))
 
-        groups_fused: dict = {}
-        nlists_f, remnant_f = run_increase(
-            rows, n, target, on_group=lambda c, kids: groups_fused.__setitem__(c, kids))
-        nlists_r, remnant_r, groups_r = run_increase_reference(rows, n, target)
+            groups_fused: dict = {}
+            nlists_f, remnant_f = run_increase(
+                rows, n, target,
+                on_group=lambda c, kids: groups_fused.__setitem__(c, kids))
+            nlists_r, remnant_r, groups_r = run_increase_reference(rows, n, target)
 
-        assert nlists_f == nlists_r, f"nlists differ trial {trial}"
-        assert remnant_f == remnant_r, f"remnant differ trial {trial}"
-        assert groups_fused == groups_r, f"groups differ trial {trial}"
+            assert nlists_f == nlists_r, f"nlists differ diff={diff} trial={trial}"
+            assert remnant_f == remnant_r, f"remnant differ diff={diff} trial={trial}"
+            assert groups_fused == groups_r, f"groups differ diff={diff} trial={trial}"
 
-        # invariants
-        utilised: set[tuple[int, ...]] = set()
-        for nl, kids in groups_fused.items():
-            assert len(kids) >= 2
-            assert tuple(sorted(set().union(*[set(k) for k in kids]))) == nl, "union!=nlist"
-            for kid in kids:
-                assert set(kid) < set(nl) and len(kid) == target - 1, "kid not (t-1)-subset"
-                assert kid not in utilised, "kid reused across groups"
-                utilised.add(kid)
-        assert utilised | remnant_f == rows, "utilised+remnant != input"
-        assert not (utilised & remnant_f), "overlap utilised/remnant"
+            # invariants (general diff): each child is a width-n proper subset of
+            # its NList, used at most once; children + remnant partition the input.
+            utilised: set[tuple[int, ...]] = set()
+            for nl, kids in groups_fused.items():
+                assert len(kids) > diff, "accepted group has <= diff children"
+                for kid in kids:
+                    assert set(kid) < set(nl) and len(kid) == n, "kid not width-n subset"
+                    assert kid not in utilised, "kid reused across groups"
+                    utilised.add(kid)
+            assert utilised | remnant_f == rows, "utilised+remnant != input"
+            assert not (utilised & remnant_f), "overlap utilised/remnant"
+            total += 1
 
-    print("  200/200 trials passed — implementation matches spec, invariants hold")
+    print(f"  {total}/{total} trials passed (diff=1,2,3) — "
+          "matches reference, invariants hold")
 
 
 # ───────────────────────────────────────── io / runner ────────────────────
@@ -206,7 +245,8 @@ def run_key(key: str) -> None:
     path = CORE / fname
     prefix = path.stem  # c545 / Main_Data_sat
 
-    print(f"\n{'='*60}\n{key}: {fname}  (n={n}, target={target}, diff=1)\n{'='*60}")
+    print(f"\n{'='*60}\n{key}: {fname}  "
+          f"(n={n}, target={target}, diff={target-n})\n{'='*60}")
     t0 = time.time()
 
     print("loading input...")
