@@ -236,6 +236,7 @@ from syndicate_core.collation import *
 from syndicate_core.b_sync import *
 from syndicate_core.scanners import (
     parse_cvi_filename, cvi_date_from_mtime, resolve_main_data_choices)
+from syndicate_core.stacked_blocks import render_columns, column_pads
 
 SCRAPE_URL = "https://www.thelott.com/syndicates?postcode={pc}"
 SCRAPE_URL_WA = "https://www.lotterywest.wa.gov.au/play-online/syndicate-games?postcode={pc}"
@@ -3188,14 +3189,18 @@ elif page == "🧩 Variable Inputs":
 
                 _sd_view = st.radio(
                     "View mode:",
-                    ["Flat rank", "Cascading (lineage)"],
+                    ["Flat rank", "Cascading (lineage)", "Blocked flat (all_wt)"],
                     horizontal=True,
                     key="sd_view_mode",
                     help=("Flat rank = each column ranked independently by its own "
                           "since-last (present order). Cascading = seed the deck from "
                           "the oldest draw and walk forward — each draw's fresh winners "
                           "jump to the top while repeats hold their prior position, "
-                          "tracing lineage diagonally across columns."))
+                          "tracing lineage diagonally across columns. "
+                          "Blocked flat = each column is that draw's clean all_wt "
+                          "grouped into SL blocks; the newest column decorates the "
+                          "previous skeleton (winners lifted to a top block, old cells "
+                          "left as catch-coloured holes)."))
 
                 def _sd_parse_nums(val):
                     """Parse numbers column back from CSV string '[1, 5, 12 …]' or list."""
@@ -3307,7 +3312,132 @@ elif page == "🧩 Variable Inputs":
                 _sd_draws_data = []
                 _sd_casc_caption: list = []   # per-draw fresh/repeat notes (cascading only)
 
-                if _sd_view == "Cascading (lineage)":
+                if _sd_view == "Blocked flat (all_wt)":
+                    # Blocked flat (all_wt) — recursive column alignment (Addendum 1).
+                    # Oldest displayed draw = clean all_wt seed; each newer column =
+                    # its winners (top block, deep-shaded) + spacer + the FULL grid of
+                    # the next-older column with those winners holed. Older winner
+                    # positions persist as gaps so every column aligns cell-for-cell.
+                    # SL is computed against the FULL history; the slider only sets the
+                    # window (and thus the seed / reference frame). Block, decoration
+                    # and alignment logic lives in syndicate_core.stacked_blocks; this
+                    # branch is render-only.
+                    _bf_n     = min(_sd_n, len(_sd_full))
+                    _bf_dis   = list(range(_bf_n))                 # newest-first indices
+                    _bf_cols  = render_columns(_bf_dis, _sd_full, _sd_pool)
+                    _bf_pads  = column_pads(_bf_dis, _sd_full)
+                    _CELL_H   = 22          # px — fixed so columns align cell-for-cell
+                    _WALL     = "#FFFFFF"   # fresh no-contrast hole = solid white wall
+
+                    def _bf_deep(_hex: str) -> str:
+                        """Deep = light band blended ~40% toward black (same hue,
+                        clearly darker). Swatches previewed below for approval before
+                        any colour value is committed (spec §6/§9)."""
+                        _h = _hex.lstrip("#")
+                        _r, _g, _b = (int(_h[0:2], 16), int(_h[2:4], 16), int(_h[4:6], 16))
+                        _f = 0.40
+                        return "#%02x%02x%02x" % (int(_r * (1 - _f)),
+                                                  int(_g * (1 - _f)),
+                                                  int(_b * (1 - _f)))
+
+                    def _bf_box(inner: str = "&nbsp;", bg: str = "transparent",
+                                border: str = "") -> str:
+                        return (f"<div style='height:{_CELL_H}px;min-width:34px;"
+                                f"display:flex;align-items:center;justify-content:center;"
+                                f"margin:1px 0;background:{bg};{border}"
+                                f"border-radius:3px;font-size:.72rem;"
+                                f"font-family:monospace;font-weight:600'>{inner}</div>")
+
+                    def _bf_cell_html(_c) -> str:
+                        _kind = _c[0]
+                        if _kind == "num":
+                            _n, _deep = _c[1], _c[2]
+                            _bg = _num_colour(_n)[0]
+                            if _deep:
+                                _bg, _fg = _bf_deep(_bg), "#fff"   # white digits on deep
+                            else:
+                                _fg = "#000"                        # black digits on light
+                            _bd = ("border:2px solid #f00;" if _n in _sd_r_nums
+                                   else "border:1px solid rgba(0,0,0,.15);")
+                            return _bf_box(f"<span style='color:{_fg}'>{_n}</span>",
+                                           bg=_bg, border=_bd)
+                        if _kind == "hole":
+                            _fill = _c[1]
+                            if _fill is None:                       # fresh no-contrast wall
+                                return _bf_box(bg=_WALL)
+                            return _bf_box(bg=_num_colour(_fill)[0])  # catch = LIGHT band
+                        # gap (inherited empty — colour lives one column) / spacer / pad
+                        return _bf_box()
+
+                    # per-draw fresh/repeat caption (mirrors cascading)
+                    _bf_caption = []
+                    for _j in range(_bf_n):
+                        _draw = _sd_full[_j]
+                        _cur  = _draw["nums"]
+                        if _j + 1 < len(_sd_full):
+                            _prev = _sd_full[_j + 1]["nums"]
+                            _fr = sorted(_cur - _prev)
+                            _rp = sorted(_cur & _prev)
+                        else:
+                            _fr, _rp = sorted(_cur), []
+                        _cp = f"D{_draw['draw']}: {len(_fr)} fresh, {len(_rp)} repeat"
+                        if _rp:
+                            _cp += f" ({', '.join(map(str, _rp))})"
+                        _bf_caption.append(_cp)
+
+                    # ── assemble columns side by side (recursive alignment via pads) ──
+                    _bf_html = ["<div style='display:flex;flex-direction:row;gap:6px;"
+                                "overflow-x:auto;align-items:flex-start'>"]
+                    for _j in range(_bf_n):
+                        _draw = _sd_full[_j]
+                        _bf_html.append(
+                            "<div style='display:flex;flex-direction:column;"
+                            "align-items:center'>")
+                        _bf_html.append(
+                            f"<div style='background:#222;color:#ccc;padding:3px 8px;"
+                            f"text-align:center;white-space:nowrap;border-radius:3px;"
+                            f"margin-bottom:3px;font-family:monospace;font-size:.72rem'>"
+                            f"D{_draw['draw']}<br><span style='font-size:.65rem;"
+                            f"color:#888'>{_draw['date']}</span></div>")
+                        for _ in range(_bf_pads[_j]):
+                            _bf_html.append(_bf_box())            # top pad (alignment)
+                        for _c in _bf_cols[_j]:
+                            _bf_html.append(_bf_cell_html(_c))
+                        _bf_html.append("</div>")
+                    _bf_html.append("</div>")
+                    st.markdown("".join(_bf_html), unsafe_allow_html=True)
+
+                    # ── deep-shade swatch preview (approve before committing colour) ──
+                    _bf_sw = ["<div style='margin-top:8px;font-size:.72rem'>"
+                              "<b>Deep-shade swatches</b> (light / deep — approve before "
+                              "commit): "]
+                    for _rep in (5, 15, 25, 35, 44):
+                        _lc = _num_colour(_rep)[0]
+                        _dc = _bf_deep(_lc)
+                        _bf_sw.append(
+                            f"<span style='display:inline-block;width:22px;height:14px;"
+                            f"background:{_lc};border:1px solid #333;vertical-align:middle'>"
+                            f"</span>"
+                            f"<span style='display:inline-block;width:22px;height:14px;"
+                            f"background:{_dc};border:1px solid #333;margin-right:10px;"
+                            f"vertical-align:middle'></span>")
+                    _bf_sw.append("</div>")
+                    st.markdown("".join(_bf_sw), unsafe_allow_html=True)
+
+                    st.caption(
+                        f"Blocked flat — SL vs full {len(_sd_full)} draws; showing newest "
+                        f"{_bf_n} (newest left). Columns align recursively: the oldest "
+                        f"shown (D{_sd_full[_bf_n - 1]['draw']}) seeds the skeleton, so the "
+                        "slider sets the reference frame. Each newer column lifts its "
+                        "winners to a top block and leaves their old cells as catch holes "
+                        "(solid white = wall; inherited gaps stay blank). Deep = repeat. "
+                        "Recent-window tool — large slider values make very tall columns.")
+                    st.caption("  •  ".join(_bf_caption))
+                    if _sd_r_nums:
+                        st.caption(
+                            f"Red outline = in R combos ({len(_sd_r_nums)} numbers): "
+                            f"{sorted(_sd_r_nums)}")
+                elif _sd_view == "Cascading (lineage)":
                     # Compute cascading order ONCE over the FULL history (the one-time
                     # cost of seeding from the true oldest draw), then display only the
                     # most recent N. The SL badge still shows each number's real
@@ -3339,7 +3469,9 @@ elif page == "🧩 Variable Inputs":
                                                _sd_rows[_di]["date"],
                                                _ord, _sld))
 
-                if not _sd_draws_data:
+                if _sd_view == "Blocked flat (all_wt)":
+                    pass  # fully rendered in the build branch above
+                elif not _sd_draws_data:
                     st.info("Not enough draw history to display.")
                 else:
                     # ── HTML table: rows = rank (1..pool), cols = one draw per strip ──
