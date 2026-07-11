@@ -3186,6 +3186,17 @@ elif page == "🧩 Variable Inputs":
                     1, min(_sd_available, 10), min(4, _sd_available),
                     key="sd_n_draws")
 
+                _sd_view = st.radio(
+                    "View mode:",
+                    ["Flat rank", "Cascading (lineage)"],
+                    horizontal=True,
+                    key="sd_view_mode",
+                    help=("Flat rank = each column ranked independently by its own "
+                          "since-last (present order). Cascading = seed the deck from "
+                          "the oldest draw and walk forward — each draw's fresh winners "
+                          "jump to the top while repeats hold their prior position, "
+                          "tracing lineage diagonally across columns."))
+
                 def _sd_parse_nums(val):
                     """Parse numbers column back from CSV string '[1, 5, 12 …]' or list."""
                     if isinstance(val, list):
@@ -3203,6 +3214,17 @@ elif page == "🧩 Variable Inputs":
                 _sd_rows: list = []
                 for _, _sdr in _sd_hist.head(_sd_lookback).iterrows():
                     _sd_rows.append({
+                        "draw": str(_sdr.get("draw", "")),
+                        "date": str(_sdr.get("date", ""))[:10],
+                        "nums": set(_sd_parse_nums(_sdr.get("numbers", ""))),
+                    })
+
+                # FULL history (newest-first) — cascading seeds from the true
+                # oldest draw and walks forward through every draw, so it needs
+                # the entire file, not the display-window slice above.
+                _sd_full: list = []
+                for _, _sdr in _sd_hist.iterrows():
+                    _sd_full.append({
                         "draw": str(_sdr.get("draw", "")),
                         "date": str(_sdr.get("date", ""))[:10],
                         "nums": set(_sd_parse_nums(_sdr.get("numbers", ""))),
@@ -3245,17 +3267,77 @@ elif page == "🧩 Variable Inputs":
                     ordered = sorted(range(1, pool + 1), key=lambda n: (sl[n], n))
                     return ordered, sl
 
-                # Pre-compute each draw's own present order (no threshold filtering).
-                # Every column shows all 45 numbers ranked by that draw's SL.
-                # The diagonal staircase emerges naturally: numbers at SL=0 in
-                # the most-recent column shift down in older columns as their SL
-                # grows, creating the movement pattern across draws.
+                def _sd_cascading_order(history: list, pool: int):
+                    """Cascading lineage order over full history (newest-first in/out).
+
+                    Seeds the deck from the OLDEST draw using _sd_present_order(),
+                    then walks forward chronologically:
+                      fresh  = this draw's winners NOT in the previous draw's winners
+                      repeat = this draw's winners that WERE in the previous draw
+                    fresh numbers are pulled to the top ascending; repeats and every
+                    other number keep their relative order (passively shift down).
+
+                    Returns newest-first list of (draw_label, date, ordered_deck_list).
+                    """
+                    if not history:
+                        return []
+
+                    oldest_idx = len(history) - 1
+                    seed_ordered, _ = _sd_present_order(oldest_idx, history, pool)
+
+                    chron = list(reversed(history))  # oldest -> newest
+                    deck = list(seed_ordered)
+                    results = [(chron[0]["draw"], chron[0]["date"], list(deck))]
+
+                    prev_winners = chron[0]["nums"]
+                    for _ci in range(1, len(chron)):
+                        cur_winners = chron[_ci]["nums"]
+                        fresh = sorted(n for n in cur_winners if n not in prev_winners)
+                        fresh_set = set(fresh)
+                        deck = fresh + [x for x in deck if x not in fresh_set]
+                        results.append(
+                            (chron[_ci]["draw"], chron[_ci]["date"], list(deck)))
+                        prev_winners = cur_winners
+
+                    return list(reversed(results))  # back to newest-first
+
+                # Build _sd_draws_data as a list of (draw_label, date, ordered_list,
+                # sl_dict) — identical shape for both views, so the one HTML render
+                # block below is reused unchanged. Only the ordering source differs.
                 _sd_draws_data = []
-                for _di in range(min(_sd_n, len(_sd_rows))):
-                    _ord, _sld = _sd_present_order(_di, _sd_rows, _sd_pool)
-                    _sd_draws_data.append((_sd_rows[_di]["draw"],
-                                           _sd_rows[_di]["date"],
-                                           _ord, _sld))
+                _sd_casc_caption: list = []   # per-draw fresh/repeat notes (cascading only)
+
+                if _sd_view == "Cascading (lineage)":
+                    # Compute cascading order ONCE over the FULL history (the one-time
+                    # cost of seeding from the true oldest draw), then display only the
+                    # most recent N. The SL badge still shows each number's real
+                    # since-last at that draw; only the row ordering comes from cascade.
+                    _sd_casc = _sd_cascading_order(_sd_full, _sd_pool)  # newest-first
+                    for _di in range(min(_sd_n, len(_sd_casc))):
+                        _dl, _date, _ord = _sd_casc[_di]
+                        _, _sld = _sd_present_order(_di, _sd_full, _sd_pool)
+                        _sd_draws_data.append((_dl, _date, _ord, _sld))
+                        # fresh vs repeat for this draw (vs immediately older draw)
+                        _cur_w = _sd_full[_di]["nums"]
+                        if _di + 1 < len(_sd_full):
+                            _prev_w = _sd_full[_di + 1]["nums"]
+                            _fresh_w = sorted(n for n in _cur_w if n not in _prev_w)
+                            _rep_w   = sorted(n for n in _cur_w if n in _prev_w)
+                        else:
+                            _fresh_w, _rep_w = sorted(_cur_w), []
+                        _cap = f"D{_dl}: {len(_fresh_w)} fresh, {len(_rep_w)} repeat"
+                        if _rep_w:
+                            _cap += f" ({', '.join(map(str, _rep_w))})"
+                        _sd_casc_caption.append(_cap)
+                else:
+                    # Flat rank — each column ranked independently by its own SL
+                    # (present order). The diagonal staircase emerges naturally as a
+                    # number's SL grows in older columns. Unchanged legacy behaviour.
+                    for _di in range(min(_sd_n, len(_sd_rows))):
+                        _ord, _sld = _sd_present_order(_di, _sd_rows, _sd_pool)
+                        _sd_draws_data.append((_sd_rows[_di]["draw"],
+                                               _sd_rows[_di]["date"],
+                                               _ord, _sld))
 
                 if not _sd_draws_data:
                     st.info("Not enough draw history to display.")
@@ -3278,6 +3360,13 @@ elif page == "🧩 Variable Inputs":
                             f"</th>")
                     _sd_html.append("</tr></thead><tbody>")
 
+                    # Cascading only: each draw's own actual winners, keyed by
+                    # draw label (from full history — never recomputed). Used to
+                    # blank every non-winner cell so the sparse block pattern
+                    # emerges. Flat rank ignores this and renders every cell.
+                    _sd_cascade = (_sd_view == "Cascading (lineage)")
+                    _sd_win_by_label = {r["draw"]: r["nums"] for r in _sd_full}
+
                     for _rank in range(_sd_pool):
                         _row_bg = "#1a1a1a" if _rank % 2 == 0 else "#141414"
                         _sd_html.append(
@@ -3286,6 +3375,31 @@ elif page == "🧩 Variable Inputs":
                             f"color:#555;font-size:.7rem'>{_rank + 1}</td>")
                         for _dl, _date, _ord, _sld in _sd_draws_data:
                             _num    = _ord[_rank]
+
+                            if _sd_cascade:
+                                # Colour a cell only where _num actually won THIS
+                                # draw; every other cell in the column stays blank
+                                # (same box size → columns don't shift). No SL
+                                # sub-label: a visible cell is a winner ⇒ SL=0.
+                                if _num not in _sd_win_by_label.get(_dl, set()):
+                                    _sd_html.append(
+                                        "<td style='padding:2px 5px;text-align:center'>"
+                                        "<span style='display:inline-block;"
+                                        "min-width:32px;padding:1px 4px;"
+                                        "line-height:1.3'>&nbsp;</span></td>")
+                                    continue
+                                _bg, _fg = _num_colour(_num)
+                                _outline = ("border:2px solid #f00;"
+                                            if _num in _sd_r_nums
+                                            else "border:1px solid rgba(0,0,0,.15);")
+                                _sd_html.append(
+                                    f"<td style='padding:2px 5px;text-align:center'>"
+                                    f"<span style='display:inline-block;background:{_bg};"
+                                    f"color:{_fg};{_outline}border-radius:3px;"
+                                    f"min-width:32px;padding:1px 4px;font-weight:600;"
+                                    f"line-height:1.3'>{_num}</span></td>")
+                                continue
+
                             _sl_val = _sld.get(_num, 0)
                             _bg, _fg = _num_colour(_num)
                             _outline = ("border:2px solid #f00;"
@@ -3303,6 +3417,14 @@ elif page == "🧩 Variable Inputs":
 
                     _sd_html.append("</tbody></table></div>")
                     st.markdown("".join(_sd_html), unsafe_allow_html=True)
+
+                    if _sd_view == "Cascading (lineage)":
+                        st.caption(
+                            f"Cascading seeded from {len(_sd_full)} draws "
+                            f"(oldest = D{_sd_full[-1]['draw']} @ "
+                            f"{_sd_full[-1]['date']}), showing most recent {_sd_n}. "
+                            "Fresh winners jump to the top; repeats hold prior position.")
+                        st.caption("  •  ".join(_sd_casc_caption))
 
                     if _sd_r_nums:
                         st.caption(
