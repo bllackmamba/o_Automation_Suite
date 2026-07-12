@@ -209,12 +209,19 @@ def _seed_structure(draw_idx: int, history: Sequence[Mapping], pool: int) -> lis
 
 def column_structures(draw_indices: Sequence[int], history: Sequence[Mapping],
                       pool: int) -> list[list[tuple]]:
-    """Structural (colour-free) cells for each displayed column.
+    """Structural cells for each displayed column.
 
     ``draw_indices`` are the displayed draws newest-first ([d_0 … d_k], indices
     into ``history``). Returns a newest-first list aligned to ``draw_indices``.
     col(d_k) is the seed; col(d_j<k) = W_j top block + spacer + col(d_{j+1})
-    with each W_j member turned to ``("empty",)``.
+    with each W_j member turned into a hole.
+
+    Cell kinds: ``("num", n)``, ``("hole", "wall"|"caught")``, ``("spacer",)``.
+    A hole's kind is decided once, in the column where its number exited (wall
+    if no contrasting neighbour, else caught), and every newer column INHERITS
+    that same kind unchanged — hole colour is a permanent record, not a
+    one-column decoration (Addendum 1, Visual round 5). Deep shade is the only
+    per-column decoration, applied later in :func:`render_columns`.
     """
     k = len(draw_indices) - 1
     structs: list[list[tuple]] = [[] for _ in draw_indices]
@@ -224,11 +231,15 @@ def column_structures(draw_indices: Sequence[int], history: Sequence[Mapping],
         child = structs[j + 1]
         cells: list[tuple] = [("num", n) for n in sorted(winners)]
         cells.append(("spacer",))
-        for c in child:
+        for idx, c in enumerate(child):
             if c[0] == "num":
-                cells.append(("empty",) if c[1] in winners else ("num", c[1]))
-            elif c[0] == "empty":
-                cells.append(("empty",))
+                if c[1] in winners:                       # fresh exit → new hole
+                    fill = _catch_over_cells(child, idx, winners)
+                    cells.append(("hole", "caught" if fill is not None else "wall"))
+                else:
+                    cells.append(("num", c[1]))
+            elif c[0] == "hole":
+                cells.append(c)                            # inherited — colour persists
             else:
                 cells.append(("spacer",))
         structs[j] = cells
@@ -239,46 +250,26 @@ def render_columns(draw_indices: Sequence[int], history: Sequence[Mapping],
                    pool: int) -> list[list[tuple]]:
     """Render-ready cells for each displayed column (newest-first).
 
-    Render cell kinds: ``("num", n, deep)``, ``("hole", fill_or_None)``
-    (fresh hole; None => white wall), ``("gap",)`` (inherited empty — no
-    fill), ``("spacer",)``. Deep shading is applied only to the column's own
-    top block (spec §5); inherited numbers render plain.
+    Render cell kinds: ``("num", n, deep)``, ``("hole", "wall"|"caught")``,
+    ``("spacer",)``. Hole kinds come straight from :func:`column_structures`
+    (they persist across columns); the only thing added here is per-column deep
+    shading, which lands only on the column's own top block (spec §5) because
+    ``deep_repeats(d_j) ⊆ W_j`` and a winner's inherited occurrences are holes,
+    not numbers.
     """
     if not draw_indices:
         return []
-    k = len(draw_indices) - 1
     structs = column_structures(draw_indices, history, pool)
-    out: list[list[tuple]] = [[] for _ in draw_indices]
-
-    # seed column (oldest displayed): its own all_wt, deep on its SL0 block
-    di = draw_indices[k]
-    deep = deep_repeats(di, history)
-    seed: list[tuple] = []
-    for bi, blk in enumerate(block_layout(di, history, pool)):
-        if bi:
-            seed.append(("spacer",))
-        for n in blk:
-            seed.append(("num", n, n in deep))
-    out[k] = seed
-
-    for j in range(k - 1, -1, -1):
-        di = draw_indices[j]
-        winners = set(history[di]["nums"])
+    out: list[list[tuple]] = []
+    for j, di in enumerate(draw_indices):
         deep = deep_repeats(di, history)
-        child = structs[j + 1]
-        cells: list[tuple] = [("num", n, n in deep) for n in sorted(winners)]
-        cells.append(("spacer",))
-        for idx, c in enumerate(child):
+        col: list[tuple] = []
+        for c in structs[j]:
             if c[0] == "num":
-                if c[1] in winners:
-                    cells.append(("hole", _catch_over_cells(child, idx, winners)))
-                else:
-                    cells.append(("num", c[1], False))
-            elif c[0] == "empty":
-                cells.append(("gap",))
+                col.append(("num", c[1], c[1] in deep))
             else:
-                cells.append(("spacer",))
-        out[j] = cells
+                col.append(c)                              # hole (with kind) or spacer
+        out.append(col)
     return out
 
 
@@ -291,3 +282,58 @@ def column_pads(draw_indices: Sequence[int], history: Sequence[Mapping]) -> list
         prev_w = len(history[draw_indices[j - 1]]["nums"])
         pads[j] = pads[j - 1] + prev_w + 1
     return pads
+
+
+# ── group clarity: rail + visible group count (Addendum 1, Visual round 3) ───
+# A "group" is an SL group: a spacer-bounded run that still holds a surviving
+# NUMBER. Holes and white walls (numbers that emigrated to a newer top block)
+# do NOT make a group — otherwise the count would exceed the distinct SL count
+# and diverge from the 'max groups' grouping (decision 6 wins over decision 5's
+# looser "non-gap" wording; confirmed with Tai 2026-07-11). The rail still
+# spans holes/walls, but only inside a run that has a number.
+
+def visible_group_count(cells: Sequence) -> int:
+    """Number of SL groups visible in a column: spacer-bounded runs that hold
+    at least one ``("num", …)`` cell. A run split only by inherited holes still
+    counts as ONE group; an all-hole run counts as ZERO. Equals the number of
+    distinct SL values for the column's draw (asserted in tests) — this is the
+    count Tai reads to set 'max groups'."""
+    count = 0
+    run_has_num = False
+    in_run = False
+    for c in cells:
+        if c[0] == "spacer":
+            if in_run and run_has_num:
+                count += 1
+            in_run, run_has_num = False, False
+        else:
+            in_run = True
+            if c[0] == "num":
+                run_has_num = True
+    if in_run and run_has_num:
+        count += 1
+    return count
+
+
+def group_rail_flags(cells: Sequence) -> list[bool]:
+    """Per-cell flag: does this cell carry the group rail? A run is railed only
+    if it holds a surviving number; within such a run the rail spans from its
+    first to its last visible cell — num or hole (wall/caught) — passing through
+    any cells in between. Cells outside that span, spacers, and all-hole runs
+    get no rail (Addendum 1, decisions 4 + num-only count)."""
+    flags = [False] * len(cells)
+    n = len(cells)
+    i = 0
+    while i < n:
+        if cells[i][0] == "spacer":
+            i += 1
+            continue
+        j = i
+        while j < n and cells[j][0] != "spacer":
+            j += 1
+        if any(cells[k][0] == "num" for k in range(i, j)):
+            visible = [k for k in range(i, j) if cells[k][0] in ("num", "hole")]
+            for k in range(visible[0], visible[-1] + 1):
+                flags[k] = True
+        i = j
+    return flags

@@ -20,8 +20,10 @@ from syndicate_core.stacked_blocks import (
     column_structures,
     decorate_newest,
     deep_repeats,
+    group_rail_flags,
     render_columns,
     since_last_map,
+    visible_group_count,
 )
 
 POOL = 45
@@ -172,13 +174,19 @@ def _coarse(cells):
 
 def test_recursion_identity_grid_equals_child_holed(history, idx):
     """Addendum test 1: col(D4689)'s grid below its top block == col(D4687)'s
-    full grid with D4689's winners holed, cell-for-cell."""
+    full grid with D4689's winners holed (kind-aware), cell-for-cell."""
     dis = [idx["4691"], idx["4689"], idx["4687"]]
     structs = column_structures(dis, history, POOL)
     w4689 = set(history[idx["4689"]]["nums"])
     offset = len(w4689) + 1  # top block + spacer
-    child = structs[2]       # col(D4687) structure
-    expected = [("empty",) if (c[0] == "num" and c[1] in w4689) else c for c in child]
+    child = structs[2]       # col(D4687) structure (seed: nums + spacers only)
+    expected = []
+    for i, c in enumerate(child):
+        if c[0] == "num" and c[1] in w4689:
+            fill = _catch_over_cells(child, i, w4689)
+            expected.append(("hole", "caught" if fill is not None else "wall"))
+        else:
+            expected.append(c)
     assert structs[1][offset:] == expected
 
 
@@ -193,21 +201,32 @@ def test_alignment_invariant_four_column_window(history, idx):
         assert _coarse(structs[j][offset:]) == _coarse(structs[j + 1])
 
 
-def test_render_fresh_vs_inherited_holes(history, idx):
-    """Addendum test 3: fresh holes carry a catch fill (number) or None (wall);
-    inherited empties render as plain gaps with no fill."""
+def test_holes_carry_persistent_kind_no_gaps(history, idx):
+    """Addendum test 3 (round 5): every empty cell is a coloured hole carrying
+    "wall"/"caught" — there are no blank gap cells, and hole colour persists
+    into newer columns."""
     dis = [idx["4691"], idx["4689"], idx["4687"]]
     cols = render_columns(dis, history, POOL)
+    for col in cols:
+        for c in col:
+            assert c[0] in ("num", "hole", "spacer")   # no "gap"/"empty" kinds
+            if c[0] == "hole":
+                assert c[1] in ("wall", "caught")
+    # newest column must contain fresh holes; both wall and caught occur today
     newest = cols[0]
-    kinds = {c[0] for c in newest}
-    assert "hole" in kinds          # fresh W_0 holes exist
-    assert "gap" in kinds           # inherited empties exist
-    # holes hold either an int fill or None; gaps carry nothing extra
-    for c in newest:
-        if c[0] == "hole":
-            assert c[1] is None or isinstance(c[1], int)
-        if c[0] == "gap":
-            assert len(c) == 1
+    hole_kinds = {c[1] for c in newest if c[0] == "hole"}
+    assert "wall" in hole_kinds and "caught" in hole_kinds
+
+
+def test_wall_kind_persists_into_newer_column(history, idx):
+    """15's wall (created when it left D4689's top block, below 17 same band)
+    must still be a wall in the newer D4691 column — colour persists."""
+    dis = [idx["4691"], idx["4689"], idx["4687"]]
+    structs = column_structures(dis, history, POOL)
+    # 15 exits at D4689 (col index 1): its old rel-4687 singleton position is a
+    # wall there and stays a wall in col(D4691) (index 0).
+    assert ("hole", "wall") in structs[1]
+    assert ("hole", "wall") in structs[0]
 
 
 def test_newest_column_recursive_fills_match_8_3(history, idx):
@@ -241,8 +260,10 @@ def test_every_column_has_each_number_once(history, idx, ncols):
 
 def test_deep_lives_in_one_column_only(history, idx):
     """Deep shade is per-column: a big window whose newest column embeds
-    D4685's block still shows deep only for the newest draw's own repeats."""
-    dis = list(range(6))  # D4691 … D4681
+    D4685's block still shows deep only for the newest draw's own repeats.
+    Anchored by draw ID (not raw range) so it survives new draws landing in
+    draw_history.csv."""
+    dis = [idx[d] for d in ("4691", "4689", "4687", "4685", "4683", "4681")]
     cols = render_columns(dis, history, POOL)
     newest_deep = {c[1] for c in cols[0] if c[0] == "num" and c[2]}
     assert newest_deep == {15}                         # only D4691's repeat
@@ -257,3 +278,51 @@ def test_column_pads_formula(history, idx):
     pads = column_pads(dis, history)
     # sat picks 6 -> +7 per column
     assert pads == [0, 7, 14, 21]
+
+
+# ── Addendum 1, Visual round 3: group rail + visible group count ────────────
+def test_visible_group_count_mid_hole_counts_as_one():
+    cells = [("num", 8, False), ("hole", "caught"), ("num", 19, False)]  # one run
+    assert visible_group_count(cells) == 1
+
+
+def test_visible_group_count_all_hole_runs_count_zero():
+    cells = [
+        ("num", 8, False), ("spacer",),
+        ("hole", "wall"), ("hole", "caught"), ("spacer",),  # all-hole block -> 0
+        ("hole", "wall"),                                    # lone wall block -> 0
+    ]
+    # only the first run holds a surviving number
+    assert visible_group_count(cells) == 1
+
+
+def test_group_rail_spans_first_to_last_visible():
+    cells = [("hole", "wall"), ("num", 5, False), ("hole", "caught"),
+             ("num", 9, False), ("spacer",)]
+    flags = group_rail_flags(cells)
+    # run has a number, so the whole run (incl. its holes) is railed
+    assert flags == [True, True, True, True, False]
+
+
+def test_group_rail_all_hole_run_has_no_rail():
+    cells = [("hole", "wall"), ("hole", "caught")]
+    assert group_rail_flags(cells) == [False, False]
+
+
+def test_group_rail_lone_wall_run_has_no_rail():
+    # a run of only a white wall (winner emigrated) is not a group -> no rail
+    cells = [("num", 8, False), ("spacer",), ("hole", "wall"), ("spacer",)]
+    assert group_rail_flags(cells) == [True, False, False, False]
+    assert visible_group_count(cells) == 1
+
+
+@pytest.mark.parametrize("ncols", [1, 2, 3, 5, 10])
+def test_group_count_identity_matches_distinct_sl(history, idx, ncols):
+    """Addendum test 6: for every displayed column, visible_group_count equals
+    the number of distinct SL values relative to that draw (the Since-Last
+    grouping 'max groups' actually consumes)."""
+    dis = list(range(ncols))
+    cols = render_columns(dis, history, POOL)
+    for j, col in enumerate(cols):
+        distinct_sl = len(set(since_last_map(dis[j], history, POOL).values()))
+        assert visible_group_count(col) == distinct_sl
