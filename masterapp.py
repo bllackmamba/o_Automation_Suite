@@ -3465,11 +3465,17 @@ elif page == "🧩 Variable Inputs":
                 elif _sd_view == "Cascading (lineage)":
                     # Compute cascading order ONCE over the FULL history (the one-time
                     # cost of seeding from the true oldest draw), then display only the
-                    # most recent N. The SL badge still shows each number's real
-                    # since-last at that draw; only the row ordering comes from cascade.
+                    # most recent N. Each column is drawn against the deck it INHERITED
+                    # from the previous (older) draw — i.e. the state BEFORE this draw
+                    # reset its own winners to the top — so winners appear at the depth
+                    # they sank to since their last win (deep scatter + diagonal drift)
+                    # instead of collapsing into rows 1-6. The oldest displayed draw has
+                    # no older neighbour, so it falls back to its own deck.
                     _sd_casc = _sd_cascading_order(_sd_full, _sd_pool)  # newest-first
                     for _di in range(min(_sd_n, len(_sd_casc))):
-                        _dl, _date, _ord = _sd_casc[_di]
+                        _dl, _date, _ = _sd_casc[_di]
+                        _inc = _di + 1 if _di + 1 < len(_sd_casc) else _di
+                        _ord = _sd_casc[_inc][2]          # incoming (pre-reset) deck
                         _, _sld = _sd_present_order(_di, _sd_full, _sd_pool)
                         _sd_draws_data.append((_dl, _date, _ord, _sld))
                         # fresh vs repeat for this draw (vs immediately older draw)
