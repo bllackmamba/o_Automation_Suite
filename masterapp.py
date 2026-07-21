@@ -238,6 +238,18 @@ from syndicate_core.scanners import (
     parse_cvi_filename, cvi_date_from_mtime, resolve_main_data_choices)
 from syndicate_core.stacked_blocks import (
     render_columns, column_pads, visible_group_count, group_rail_flags)
+from syndicate_core.refgroup import (
+    SET_LABEL as _REFGROUP_LABEL,
+    build_ref_group_piece,
+    classify_shared,
+    empirical_stream_counts,
+    hypergeometric_breakdown,
+    load_newest_reference,
+    locked_sc_dict,
+    selected_bands_for_pick,
+    selected_unselected,
+    total_space,
+)
 
 SCRAPE_URL = "https://www.thelott.com/syndicates?postcode={pc}"
 SCRAPE_URL_WA = "https://www.lotterywest.wa.gov.au/play-online/syndicate-games?postcode={pc}"
@@ -847,7 +859,8 @@ def _cvi_display(df: pd.DataFrame) -> pd.DataFrame:
     return disp
 
 
-def execute_collation(components: list[str]) -> pd.DataFrame:
+def execute_collation(components: list[str],
+                      *, ref_group: list[int] | None = None) -> pd.DataFrame:
     """
     Build a formula's CVI by STACKING each variable's w-sets as ROWS (vertically)
     and numbering the position columns w1, w2, … across the widest combination.
@@ -885,6 +898,14 @@ def execute_collation(components: list[str]) -> pd.DataFrame:
         block = block.rename(columns={c: f"w{i+1}" for i, c in enumerate(val_cols)})
         block.insert(0, "Source", var)
         pieces.append(block)
+
+    # RefGroup_w1 joins the SAME stack as a 7th block (1 row), appended LAST so
+    # the sequential Row_ID assignment below hands it the next ID after every
+    # variable block — never a hand-picked ID (see syndicate_core/refgroup.py).
+    # Opt-in: default (ref_group=None) leaves every existing CVI export byte-
+    # identical; only the RefGroup feature passes the newest draw's numbers.
+    if ref_group:
+        pieces.append(build_ref_group_piece(ref_group))
 
     if not pieces:
         return pd.DataFrame()
@@ -4756,6 +4777,83 @@ elif page == "🧩 Variable Inputs":
         "Container Dashboards load these automatically before formula-level SC."
     )
 
+    # ── Reference Group (RefGroup_w1) — Selected/Unselected breakdown ─────────
+    # The newest completed draw's `pick` winning numbers vs the full C(pool,pick)
+    # space, split S0..S_pick, then Selected{1,2,3}/Unselected{0,4,5,6}. Reads
+    # the SAME draw_history.csv the Stacked Draws views use (read-only), so it
+    # auto-updates to whatever the newest draw is on every load. Closed-form
+    # (Option A, 2026-07-13): the breakdown is a fixed hypergeometric property —
+    # the numbers NEVER change week to week, only WHICH 6 numbers are labelled
+    # RefGroup_w1. See syndicate_core/refgroup.py.
+    with st.expander(f"🎯 Reference Group ({_REFGROUP_LABEL}) — Selected / Unselected",
+                     expanded=False):
+        _rg_cfg  = active_game_cfg()
+        _rg_pool = int(_rg_cfg.get("pool", 45))
+        _rg_pick = int(_rg_cfg.get("pick", 6))
+        _rg_hist_path = (
+            _gdirs.get("SinceLast", _gdirs.get("Base", Path(".")))
+            / "draw_history.csv"
+        )
+        _rg_nums = load_newest_reference(_rg_hist_path, _rg_pick)
+
+        if _rg_nums is None:
+            st.markdown(
+                '<div class="warn">⚠️ No usable newest draw. Load draw history '
+                'in the <b>Stats</b> tab (Draw History → Fetch) — RefGroup_w1 '
+                'reads its numbers from the newest row of draw_history.csv.</div>',
+                unsafe_allow_html=True)
+        else:
+            _rg_bd    = hypergeometric_breakdown(_rg_pool, _rg_pick)
+            _rg_total = total_space(_rg_pool, _rg_pick)
+            _rg_bands = selected_bands_for_pick(_rg_pick)   # locked split per game
+            _rg_sel, _rg_unsel = selected_unselected(_rg_bd, _rg_bands)
+            _rg_sel_lbl = "+".join(f"S{k}" for k in _rg_bands)
+            _rg_uns_lbl = "+".join(
+                f"S{k}" for k in range(_rg_pick + 1) if k not in set(_rg_bands))
+
+            # Current reference numbers as coloured chips (labels — these DO
+            # change each week; the breakdown below does not).
+            _rg_chips = " ".join(
+                f'<span style="background:{_bg};color:{_fg};padding:2px 8px;'
+                f'border-radius:4px;font-weight:600;margin:0 2px">{_n}</span>'
+                for _n, (_bg, _fg) in ((n, _num_colour(n)) for n in _rg_nums))
+            st.markdown(
+                f'<div style="margin:.25rem 0 .5rem">'
+                f'<b>{_REFGROUP_LABEL}</b> (updates automatically each week): '
+                f'{_rg_chips}</div>', unsafe_allow_html=True)
+            st.caption(
+                f"Newest draw of {active_game()} · matched against the full "
+                f"C({_rg_pool},{_rg_pick}) = {_rg_total:,} combination space. "
+                "The breakdown is mathematically identical for ANY "
+                f"{_rg_pick}-number reference set — it does NOT change when the "
+                "newest draw changes; only the numbers above do.")
+
+            # S0..S_pick table: raw counts + % of the full space.
+            _rg_tbl = pd.DataFrame(
+                [{"Band": f"S{k}",
+                  "Count": _rg_bd[k],
+                  "% of space": round(100 * _rg_bd[k] / _rg_total, 4)}
+                 for k in range(_rg_pick + 1)])
+            st.dataframe(_rg_tbl, hide_index=True, use_container_width=True)
+
+            _rg_c1, _rg_c2 = st.columns(2)
+            _rg_c1.metric(
+                f"Selected / Repeat  ({_rg_sel_lbl})",
+                f"{_rg_sel:,}",
+                f"{100 * _rg_sel / _rg_total:.2f}% of space",
+                delta_color="off")
+            _rg_c2.metric(
+                f"Unselected / No_repeat  ({_rg_uns_lbl})",
+                f"{_rg_unsel:,}",
+                f"{100 * _rg_unsel / _rg_total:.2f}% of space",
+                delta_color="off")
+            st.caption(
+                "RefGroup_w1 has no standalone SC file; it rides the combined "
+                "CVI export as the last block (next sequential Row_ID from "
+                "execute_collation), recomputed fresh every collation.")
+
+    st.markdown("---")
+
     # ── Helper: detect n-columns from main data (mirrors run_matching heuristic) ──
     def _vi_n_cols(mdf: pd.DataFrame) -> list:
         _exp = [c for c in mdf.columns if re.match(r'^n\d+$', c, re.I)]
@@ -4808,6 +4906,94 @@ elif page == "🧩 Variable Inputs":
                         st.info(f"⏭ {_var} — skipped ({_res['reason']})")
                     else:
                         st.error(f"❌ {_var} — error: {_res['reason']}")
+
+    st.markdown("---")
+
+    # ── Repeat / No_repeat SC — LOCKED preset (confirmed 2026-07-15) ──────────
+    # One-click preset: applies the LOCKED per-game split (Selected={1..K-3},
+    # Unselected={0}∪{K-2,K-1,K}) automatically for whichever game is active —
+    # no manual threshold entry. Counts are computed against REAL main data
+    # (empirical isin, never the closed form). Additive: sits beside the manual
+    # per-variable SC workflow below and never replaces it. See
+    # syndicate_core/refgroup.py (selected_bands_for_pick / empirical_stream_counts).
+    with st.expander("🔁 Compute Repeat/No_repeat SC (locked preset)", expanded=False):
+        _ps_cfg  = active_game_cfg()
+        _ps_pick = int(_ps_cfg.get("pick", 6))
+        _ps_pool = int(_ps_cfg.get("pool", 45))
+        _ps_bands = selected_bands_for_pick(_ps_pick)
+        _ps_sel_lbl = "{" + ",".join(str(k) for k in _ps_bands) + "}"
+        _ps_uns_lbl = "{" + ",".join(
+            str(k) for k in range(_ps_pick + 1) if k not in set(_ps_bands)) + "}"
+        st.markdown(
+            f'<div class="info"><b>{active_game()}</b> (pick {_ps_pick}) — locked '
+            f'split: <b>Selected/Repeat</b> = S{_ps_sel_lbl} · '
+            f'<b>Unselected/No_repeat</b> = S{_ps_uns_lbl}. '
+            'Applied automatically; no thresholds to enter.</div>',
+            unsafe_allow_html=True)
+
+        _ps_hist_path = (
+            _gdirs.get("SinceLast", _gdirs.get("Base", Path(".")))
+            / "draw_history.csv"
+        )
+        _ps_ref = load_newest_reference(_ps_hist_path, _ps_pick)
+        if _ps_ref is None:
+            st.markdown(
+                '<div class="warn">⚠️ No usable newest draw — load draw history '
+                '(Stats → Draw History → Fetch) to set RefGroup_w1.</div>',
+                unsafe_allow_html=True)
+        else:
+            st.caption(f"RefGroup_w1 (newest {active_game()} draw): {_ps_ref}")
+
+        if st.button("🔁 Compute Repeat/No_repeat SC (locked preset)",
+                     key=f"rnr_sc_{_gkey}", use_container_width=True,
+                     help="Bucket the real main data by shared count vs RefGroup_w1 "
+                          "and apply the locked Selected/Unselected split."):
+            if _vi_main.empty:
+                st.warning("⚠️ Main Data not loaded — load it in Container Dashboards first.")
+            elif _ps_ref is None:
+                st.warning("⚠️ No usable newest draw to use as RefGroup_w1.")
+            else:
+                _ps_ncols = _vi_n_cols(_vi_main)
+                if not _ps_ncols:
+                    st.warning("⚠️ Main Data has no numeric n-columns.")
+                else:
+                    with st.spinner(f"Matching {len(_vi_main):,} real main-data rows…"):
+                        _ps_res = empirical_stream_counts(
+                            _vi_main, _ps_ncols, _ps_ref, _ps_pick)
+                    _ps_M = _ps_res["M"]
+                    _ps_tbl = pd.DataFrame([
+                        {"Band": f"S{k}",
+                         "Stream": ("Repeat" if k in set(_ps_bands) else "No_repeat"),
+                         "Count": _ps_res["bands"][k],
+                         "% of M": round(100 * _ps_res["bands"][k] / _ps_M, 4)}
+                        for k in range(_ps_pick + 1)])
+                    st.dataframe(_ps_tbl, hide_index=True, use_container_width=True)
+                    _ps_a, _ps_b = st.columns(2)
+                    _ps_a.metric(f"Repeat / Selected  S{_ps_sel_lbl}",
+                                 f"{_ps_res['selected']:,}",
+                                 f"{100 * _ps_res['selected'] / _ps_M:.2f}% of M",
+                                 delta_color="off")
+                    _ps_b.metric(f"No_repeat / Unselected  S{_ps_uns_lbl}",
+                                 f"{_ps_res['unselected']:,}",
+                                 f"{100 * _ps_res['unselected'] / _ps_M:.2f}% of M",
+                                 delta_color="off")
+                    st.caption(
+                        f"Computed against real main data (M = {_ps_M:,} rows), "
+                        "not the closed form.")
+                    # Preset sc_dict this split maps to — additive preview/export,
+                    # does NOT overwrite any manual SC_{VAR}_{game}.csv file.
+                    _ps_wcols = [f"w{i+1}" for i in range(_ps_pick)]
+                    _ps_scd = locked_sc_dict(_ps_wcols, _ps_pick)
+                    _ps_sc_df = pd.DataFrame(
+                        [{"w": w, "Selected Count": ",".join(map(str, v))}
+                         for w, v in _ps_scd.items()])
+                    st.markdown("**Preset Selected Counts (locked split, every w):**")
+                    st.dataframe(_ps_sc_df, hide_index=True, use_container_width=True)
+                    st.download_button(
+                        "⬇ Repeat/No_repeat preset SC (.csv)",
+                        to_csv_bytes(_ps_sc_df),
+                        f"SC_RepeatNoRepeat_{_gkey}.csv", "text/csv",
+                        key=f"rnr_sc_dl_{_gkey}")
 
     st.markdown("---")
 
@@ -5064,13 +5250,38 @@ elif page == "📦 Container Formula":
     st.markdown("---")
 
     if st.button(f"▶ Collate {chosen_f}", type="primary", use_container_width=True):
+        # RefGroup_w1 rides the combined CVI as a 7th block (1 row) — the newest
+        # completed draw's numbers, pulled at collation time so the export always
+        # reflects the current newest draw. execute_collation appends it LAST, so
+        # it gets the next sequential Row_ID by construction (never hardcoded).
+        # Its Main_Breakdown is filled by the same _match_cvi_rows engine every
+        # other row uses (Option B) when Per-Row CVI Match runs downstream.
+        _cf_pick = int(active_game_cfg().get("pick", 6))
+        _cf_hist_path = (
+            _gdirs.get("SinceLast", _gdirs.get("Base", Path(".")))
+            / "draw_history.csv"
+        )
+        _cf_ref = load_newest_reference(_cf_hist_path, _cf_pick)
         with st.spinner("Collating…"):
-            result = execute_collation(comps)
+            result = execute_collation(comps, ref_group=_cf_ref)
         if result.empty:
             st.error("Result empty — load components in Variable Inputs first.")
         else:
             out = _gdirs["CVI"] / f"CVI_{chosen_f}.csv"
             result.to_csv(out, index=False)
+            if _cf_ref is not None:
+                st.markdown(
+                    f'<div class="note">🎯 <b>{_REFGROUP_LABEL}</b> appended as the '
+                    f'last block (Row_ID {int(result["Row_ID"].max())}) — newest '
+                    f'draw {_cf_ref}. Its S0–S{_cf_pick} breakdown fills via the '
+                    'Per-Row CVI Match engine like every other row.</div>',
+                    unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    '<div class="warn">⚠️ No usable newest draw — CVI exported '
+                    f'WITHOUT {_REFGROUP_LABEL}. Load draw history (Stats → Draw '
+                    'History → Fetch) to include it.</div>',
+                    unsafe_allow_html=True)
             st.session_state.setdefault(gkey("cvi"), {})[chosen_f] = result
             n_wcols = sum(1 for c in result.columns if str(c).startswith("w"))
             st.markdown(f'<div class="ok">✅ {chosen_f}: {len(result):,} rows '
@@ -5520,6 +5731,71 @@ elif page == "🖥️ Container Dashboards":
             else:
                 st.caption("No precomputed result found yet — run the command "
                            "above, then reopen this dashboard.")
+
+    # ── B1 Parallel Main-Count — CVI rows vs the whole B1 source ─────────
+    # Same per-row engine as above, but the pool is B1 (unfiltered — B1's
+    # draw-number column is populated for only a handful of rows, so it can't
+    # be draw-scoped; it is matched whole). Game-agnostic: the source resolves
+    # via game_dirs()["Base"] through b1_path(), never a hardcoded sat path.
+    # Toggleable — nothing loads or computes until the expander is opened and
+    # the button pressed.
+    with st.expander("🅱️ B1 Parallel Main-Count", expanded=False):
+        st.caption(
+            "Each CVI row's own numbers matched against every B1 row "
+            "independently — same engine as Per-Row CVI Match, but the pool is "
+            "the B1 source (matched whole, no draw filtering). Columns: Row, "
+            "Row_ID, Source, Set_Label, Row_Length, B1_Count, B1_Breakdown.")
+
+        _b1_src = b1_path(_gkey)
+        if _b1_src is None:
+            st.info(f"No B1 source found for **{_gkey}** under "
+                    f"`{_gdirs['Base'].name}/` (only games with a split "
+                    "B1 file support this).")
+        elif cvi_df.empty:
+            st.info("Load a CVI above to enable the B1 parallel match.")
+        else:
+            _b1_pool = int(_gcfg["pool"])
+            _b1_pick = int(_gcfg["pick"])
+            _b1_df = pd.read_csv(_b1_src)
+
+            # Detect ball columns by pattern + position, NOT literal pos_1..N —
+            # survives a future pos_ → w_row/w rename (logic in pipeline.py so
+            # it stays testable; masterapp is UI-only).
+            _b1_cols = b1_ball_columns(_b1_df, _b1_pick)
+
+            st.caption(
+                f"B1 source: **{_b1_src.name}** · **{len(_b1_df):,}** rows × "
+                f"{len(_b1_cols)} ball-cols "
+                f"({', '.join(str(c) for c in _b1_cols) or 'none detected'}) · "
+                f"CVI rows **{len(cvi_df):,}** · pool 1–{_b1_pool}")
+
+            if not _b1_cols:
+                st.error("Could not detect B1 ball columns.")
+            elif st.button(
+                    f"🅱️ Compute B1 parallel match ({len(cvi_df):,} CVI rows)",
+                    key=f"b1_run_{db}", type="primary"):
+                # main_arr WITHOUT np.clip — out-of-range values become 0 and
+                # are excluded from matching, never fabricated (mirrors the
+                # Per-Row CVI Match array build above).
+                _b1_raw = (_b1_df[_b1_cols].apply(pd.to_numeric, errors="coerce")
+                           .to_numpy(dtype=np.float64))
+                _b1_raw = np.nan_to_num(_b1_raw, nan=0.0)
+                _b1_arr = np.where((_b1_raw >= 1) & (_b1_raw <= _b1_pool),
+                                   _b1_raw, 0).astype(np.int32)
+                with st.spinner(f"Matching {len(cvi_df):,} CVI rows against "
+                                f"{len(_b1_df):,} B1 rows…"):
+                    _b1_res = _match_cvi_rows(
+                        cvi_df, _b1_arr, pool_max=_b1_pool
+                    ).rename(columns={"Main_Count":     "B1_Count",
+                                      "Main_Breakdown": "B1_Breakdown"})
+                st.success(f"✅ Matched {len(_b1_res):,} rows against B1.")
+                show_paginated_df(_b1_res.head(200), key=f"b1_res_{db}",
+                                  use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇ Download B1 parallel match CSV",
+                    to_csv_bytes(_b1_res),
+                    f"CVI_b1_match_{_gkey}_{formula_name}.csv",
+                    "text/csv", key=f"b1_dl_{db}")
 
     st.markdown("---")
 
