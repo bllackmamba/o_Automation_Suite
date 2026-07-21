@@ -37,7 +37,7 @@ __all__ = [
     # pipeline utilities
     "_warn_row_shrink", "_clean_for_pipeline",
     # game directory resolution
-    "game_dirs",
+    "game_dirs", "b1_path", "b1_ball_columns",
     # D-file split + combine
     "split_d_by_game", "combine_states_for_game",
     # active-game accessors (wrap st.session_state)
@@ -134,6 +134,49 @@ def game_dirs(game_key: str) -> dict:
     for p in d.values():
         p.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def b1_path(game_key: str) -> "Path | None":
+    """Resolve a game's B1 source CSV under its Base_{gk} folder, or None.
+
+    Game-agnostic: derives the folder from game_dirs()["Base"] rather than any
+    hardcoded per-game path. Primary name follows the split convention
+    ``B1_{gk}_updated.csv`` (the lossless B→B1/B2 split — see CLAUDE.md
+    2026-07-21); a ``B1_{gk}*.csv`` glob is the fallback if the ``_updated``
+    suffix ever differs. Returns None when no B1 exists for the game (only sat
+    has one today), so callers degrade gracefully instead of raising.
+    """
+    gk   = game_key.lower()
+    base = game_dirs(gk)["Base"]
+
+    primary = base / f"B1_{gk}_updated.csv"
+    if primary.exists():
+        return primary
+
+    hits = sorted(base.glob(f"B1_{gk}*.csv"))
+    return hits[0] if hits else None
+
+
+def b1_ball_columns(df: pd.DataFrame, pick: int) -> list:
+    """Detect a B1 frame's ball columns by pattern + position (rename-proof).
+
+    B1's metadata columns are the ``w`` label (holds "w1".. strings) and the
+    ``update`` draw-number; every other numeric column whose name matches
+    ``pos_N`` OR ``wN``/``w_N`` is a ball position. This identifies balls
+    WITHOUT depending on the literal ``pos_1..pos_N`` names, so a future
+    ``pos_`` → ``w_row``/``w`` rename of B-derived data does not break the
+    reader. Returns up to ``pick`` columns ordered by their trailing integer.
+    """
+    meta    = {"w", "update"}
+    ball_re = re.compile(r'^(?:pos_?|w_?)\d+$', re.I)
+    cols = [
+        c for c in df.columns
+        if str(c).lower() not in meta
+        and ball_re.match(str(c))
+        and pd.to_numeric(df[c], errors="coerce").notna().mean() > 0.5
+    ]
+    cols = sorted(cols, key=lambda c: int(re.sub(r'\D', '', str(c)) or 0))
+    return cols[:pick]
 
 
 # ── D-file split + state combine ─────────────────────────────────────────────
