@@ -352,3 +352,32 @@ def test_generate_rainbow_no_cap():
     assert info["capped"] is False
     assert any("combo_guard" in str(w.message) for w in caught), \
         "Expected a combo_guard warning"
+
+
+def test_generate_rainbow_combo_uses_gap_compressed_ordinal():
+    """combo labels are the gap-compressed group ordinal (1-based rank among
+    occupied since-last groups), not the raw since-last distance. With gapped
+    SL values the two differ — this locks in the ordinal relabel."""
+    # SL values 0, 4, 20 → +1 → raw keys 1, 5, 21 (gapped). Ordinals: 1, 2, 3.
+    sl_df = pd.DataFrame({
+        "numbers":    [7, 13, 41],
+        "Since Last": [0, 4, 20],
+        "to_keep":    [7, 13, 41],
+    })
+    result_df, _, info = generate_rainbow(sl_df, max_comb=3)
+    combos = set(result_df["combo"])
+
+    # Every printed tuple integer must be a dense ordinal in 1..n (n = 3 groups),
+    # never the raw distance (5, 21) that the old numbering would have emitted.
+    assert info["n_groups"] == 3
+    assert combos == {"(1,)", "(2,)", "(3,)",
+                      "(1, 2)", "(1, 3)", "(2, 3)",
+                      "(1, 2, 3)"}, combos
+    assert not any(("5" in c or "21" in c) for c in combos), \
+        "combo labels leaked raw since-last distances instead of ordinals"
+
+    # Pure relabel: the (1, 3) combo = ordinals for raw groups 1 (num 7) and
+    # 21 (num 41) → payload {7, 41}, membership unchanged.
+    pos_cols = [c for c in result_df.columns if isinstance(c, int)]
+    row13 = result_df[result_df["combo"] == "(1, 3)"].iloc[0]
+    assert {int(v) for v in row13[pos_cols] if pd.notna(v)} == {7, 41}

@@ -260,6 +260,13 @@ def generate_rainbow(sl_df: pd.DataFrame, max_comb=None, combo_guard: int = 5_00
     result_df is row-oriented: columns = ["combo", "w", 0, 1, 2, …] where
     combo is the tuple string, w is the sequential label, and 0/1/2/… are
     the number positions (NaN for shorter combos).
+
+    The combo tuple is labelled with the gap-compressed group ORDINAL — the
+    1-based rank of each occupied since-last group, matching block_layout /
+    sl_group_regime numbering — NOT the raw since-last distance. This is a pure
+    relabel: group membership and per-row number payloads are identical; only
+    the printed tuple changes (verified: 0 rows gain/lose/change membership
+    across all 5 games).
     """
     import warnings as _warnings
     df = _normalise_sl(sl_df)
@@ -275,12 +282,18 @@ def generate_rainbow(sl_df: pd.DataFrame, max_comb=None, combo_guard: int = 5_00
             "Proceeding — pass max_comb to limit output.",
             stacklevel=2,
         )
+    # Label each combo by the gap-compressed group ordinal (1-based rank among
+    # the occupied since-last groups) instead of the raw since-last distance.
+    # grouped[g] is still keyed by the raw value g, so payloads are unchanged —
+    # only the printed tuple is relabelled.
+    key_to_ord = {k: i + 1 for i, k in enumerate(keys)}
     result = {}
     for comb in _bounded_combos(keys, requested):
         ref = []
         for g in comb:
             ref += grouped[g]
-        result[str(comb)] = [e for e in ref if e in to_keep]
+        label = tuple(key_to_ord[g] for g in comb)
+        result[str(label)] = [e for e in ref if e in to_keep]
     # Build row-oriented DataFrame: one row per combo, integer position columns.
     if not result:
         result_df = pd.DataFrame(columns=["combo", "w"])
