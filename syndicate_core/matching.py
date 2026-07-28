@@ -258,7 +258,8 @@ def _match_cvi_rows(cvi_df: pd.DataFrame, main_arr: np.ndarray, *,
         row_cols = [c for c in cvi_df.columns if re.match(r"^w\d+$", str(c), re.I)]
         if not row_cols:
             row_cols = [c for c in cvi_df.columns
-                        if c not in ("Row_ID", source_col, "Set_Label")]
+                        if c not in ("Row_ID", source_col, "Set_Label",
+                                     "Constituent_Groups")]
 
     has_row_id = "Row_ID" in cvi_df.columns
     has_source = source_col in cvi_df.columns

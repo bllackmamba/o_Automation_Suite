@@ -852,6 +852,16 @@ def _cvi_display(df: pd.DataFrame) -> pd.DataFrame:
     disp = _w_strip_display(df)
     if "Set_Label" not in disp.columns:
         return disp
+    # R rows carry the since-last combo tuple in Set_Label; preserve it as an
+    # explicit named column BEFORE Set_Label is re-based to the engine address.
+    # R only (Source == "R"); NA elsewhere. Skip if execute_collation already
+    # persisted the column (avoid a duplicate).
+    if "Source" in disp.columns and "Constituent_Groups" not in disp.columns:
+        disp.insert(
+            disp.columns.get_loc("Set_Label") + 1,
+            "Constituent_Groups",
+            disp["Set_Label"].where(disp["Source"] == "R"),
+        )
     if "Row_ID" in disp.columns:
         disp["Set_Label"] = disp["Row_ID"].apply(lambda r: f"w{int(r)}" if pd.notna(r) else "w?")
     else:
@@ -916,6 +926,14 @@ def execute_collation(components: list[str],
                    key=lambda x: int(x[1:]))
     combined = combined[["Source", "Set_Label"] + wcols]
     combined.insert(0, "Row_ID", range(1, len(combined) + 1))
+    # Persist the R since-last combo tuple (held in Set_Label for R rows at this
+    # point) under an explicit name so it survives to disk, not just on screen.
+    # R only (Source == "R"); NA elsewhere. Placed directly after Set_Label.
+    combined.insert(
+        combined.columns.get_loc("Set_Label") + 1,
+        "Constituent_Groups",
+        combined["Set_Label"].where(combined["Source"] == "R"),
+    )
     return combined
 
 
