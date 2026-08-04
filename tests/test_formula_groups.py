@@ -204,12 +204,92 @@ def test_meta_key_in_split_is_not_treated_as_a_stream():
 
 def test_real_registry_all_groups_run_with_stub_escalations():
     # Below-window candidates → every group logs below_target, nothing blocks,
-    # real ESCALATIONS pass-through never fires (n < lo).
+    # real ESCALATIONS pass-through never fires (n < lo). G1 defaults to no-split
+    # (single entry); G2/G3/G4 default to the two-stream split.
     res = _run_formula_groups(FORMULA_GROUPS, _collate_const(3), _split(),
                               ["n1"], _ctx())
     assert set(res) == {"G1", "G2", "G3", "G4"}
-    for key in ("G1", "G2", "G3", "G4"):
-        assert res[key]["status"] == "ok"
+    # G1 — no-split by default
+    assert res["G1"]["status"] == "ok" and res["G1"]["mode"] == "no_split"
+    assert set(res["G1"]["streams"]) == {"no_split"}
+    g1s = res["G1"]["streams"]["no_split"]
+    assert g1s["n"] == 3 and g1s["flag"] == "below_target" and g1s["escalated"] is False
+    # G2/G3/G4 — split
+    for key in ("G2", "G3", "G4"):
+        assert res[key]["status"] == "ok" and res[key]["mode"] == "split"
+        assert set(res[key]["streams"]) == {"Repeat", "No_Repeat"}
         for stream in ("Repeat", "No_Repeat"):
             s = res[key]["streams"][stream]
             assert s["n"] == 3 and s["flag"] == "below_target" and s["escalated"] is False
+
+
+# ── split/no-split mode (uses_main_data_split + split_override) ────────────────
+
+def _grp_ns(key, esc="noop", target=(10, 20)):
+    """A group that defaults to NO split (uses_main_data_split=False)."""
+    return FormulaGroup(key, key, ("X",), esc, target, False)
+
+
+def test_uses_main_data_split_defaults():
+    by_key = {g.key: g for g in FORMULA_GROUPS}
+    assert by_key["G1"].uses_main_data_split is False
+    for key in ("G2", "G3", "G4"):
+        assert by_key[key].uses_main_data_split is True
+
+
+def test_no_split_group_produces_single_entry_and_mode():
+    res = _run_formula_groups([_grp_ns("G")], _collate_const(15), _split(),
+                              ["n1"], _ctx(),
+                              escalations={"noop": lambda d, s, n, *, ctx: d})
+    assert res["G"]["mode"] == "no_split"
+    assert set(res["G"]["streams"]) == {"no_split"}
+    assert res["G"]["streams"]["no_split"] == {
+        "status": "ok", "n": 15, "escalated": False, "flag": None}
+
+
+def test_no_split_passes_none_stream_df_to_narrow():
+    seen = {}
+    def narrow(cands, stream_df, n_cols, *, ctx):
+        seen["stream_df"] = stream_df
+        return cands
+    _run_formula_groups([_grp_ns("G")], _collate_const(15), _split(), ["n1"],
+                        _ctx(), narrow_fn=narrow,
+                        escalations={"noop": lambda d, s, n, *, ctx: d})
+    assert seen["stream_df"] is None   # no-split runs once, with no stream
+
+
+def test_split_override_forces_no_split_group_into_split():
+    res = _run_formula_groups([_grp_ns("G")], _collate_const(3), _split(),
+                              ["n1"], _ctx(), split_override={"G": True},
+                              escalations={"noop": lambda d, s, n, *, ctx: d})
+    assert res["G"]["mode"] == "split"
+    assert set(res["G"]["streams"]) == {"Repeat", "No_Repeat"}
+
+
+def test_split_override_can_force_a_split_group_off():
+    # Symmetric: a normally-split group can be forced no-split for one run.
+    res = _run_formula_groups([_grp("G", target=(10, 20))], _collate_const(15),
+                              _split(), ["n1"], _ctx(),
+                              split_override={"G": False},
+                              escalations={"noop": lambda d, s, n, *, ctx: d})
+    assert res["G"]["mode"] == "no_split"
+    assert set(res["G"]["streams"]) == {"no_split"}
+
+
+def test_split_override_leaves_other_groups_on_their_default():
+    groups = [_grp_ns("G1"), _grp("G2")]
+    res = _run_formula_groups(groups, _collate_const(3), _split(), ["n1"], _ctx(),
+                              split_override={"G1": True},
+                              escalations={"noop": lambda d, s, n, *, ctx: d})
+    assert res["G1"]["mode"] == "split"          # overridden on
+    assert res["G2"]["mode"] == "split"          # its own default (unchanged)
+    assert set(res["G2"]["streams"]) == {"Repeat", "No_Repeat"}
+
+
+def test_no_split_still_applies_target_range_and_escalation():
+    # Above window → escalation fires even in no-split mode.
+    esc = {"shrink15": lambda d, s, n, *, ctx: d.head(15)}
+    res = _run_formula_groups([_grp_ns("G", esc="shrink15")], _collate_const(30),
+                              _split(), ["n1"], _ctx(), escalations=esc)
+    s = res["G"]["streams"]["no_split"]
+    assert s["escalated"] is True and s["n"] == 15 and s["flag"] is None

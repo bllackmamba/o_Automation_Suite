@@ -385,7 +385,8 @@ def _narrow_one_stream(group, candidates, stream_df, n_cols, ctx,
 
 
 def _run_formula_groups(groups, collate_fn, split, n_cols, ctx, *,
-                        narrow_fn=_default_narrow, escalations=ESCALATIONS) -> dict:
+                        narrow_fn=_default_narrow, escalations=ESCALATIONS,
+                        split_override=None) -> dict:
     """Run each formula group against the Repeat / No_Repeat Main Data split.
 
     Registry-driven, formula-agnostic (everything comes from ``group``), and
@@ -395,33 +396,55 @@ def _run_formula_groups(groups, collate_fn, split, n_cols, ctx, *,
     ``split`` is the main_split output — any non-stream key (e.g. ``_meta``) is
     ignored.
 
+    **Split vs no-split (per group, per run).** Each group's DEFAULT is
+    ``group.uses_main_data_split`` (True → narrow once per Main Data stream;
+    False → narrow once, independent of the split — e.g. R, whose narrowing never
+    touches Main Data). ``split_override`` (``{group.key: bool}``) overrides that
+    default for THIS run only, no config edit: ``{"G1": True}`` runs R against the
+    split for research/tracing. The mode is reported per group as ``"mode"``.
+
+    NOTE: in no-split mode the single call is made with ``stream_df=None`` — safe
+    for narrowing/escalations that ignore the stream (the only kind a group should
+    default no-split for). A future no-split group whose narrow/escalation DOES
+    consume Main Data would receive ``None`` here; that is a known risk to watch,
+    deliberately not guarded at runtime.
+
     Returns::
 
         {group.key: {"status": "ok"|"skipped"|"error",
                      "reason": str | None,
+                     "mode": "split"|"no_split",
                      "streams": {stream_name: {...per-stream status...}}}}
     """
+    override = split_override or {}
     stream_items = [(k, v) for k, v in split.items() if not str(k).startswith("_")]
     results: dict = {}
     for group in groups:
+        use_split = bool(override.get(group.key, group.uses_main_data_split))
+        mode = "split" if use_split else "no_split"
         try:
             candidates = collate_fn(group.components)
         except Exception as ex:
             logging.warning("_run_formula_groups [%s]: collate failed: %s",
                             group.key, ex)
-            results[group.key] = {"status": "error",
-                                  "reason": f"collate: {ex}", "streams": {}}
+            results[group.key] = {"status": "error", "reason": f"collate: {ex}",
+                                  "mode": mode, "streams": {}}
             continue
         if candidates is None or (hasattr(candidates, "empty") and candidates.empty):
             logging.warning("_run_formula_groups [%s]: no candidates — skipping",
                             group.key)
-            results[group.key] = {"status": "skipped",
-                                  "reason": "no candidates", "streams": {}}
+            results[group.key] = {"status": "skipped", "reason": "no candidates",
+                                  "mode": mode, "streams": {}}
             continue
-        streams = {
-            name: _narrow_one_stream(group, candidates, stream_df, n_cols, ctx,
-                                     narrow_fn, escalations)
-            for name, stream_df in stream_items
-        }
-        results[group.key] = {"status": "ok", "reason": None, "streams": streams}
+        if use_split:
+            streams = {
+                name: _narrow_one_stream(group, candidates, stream_df, n_cols,
+                                         ctx, narrow_fn, escalations)
+                for name, stream_df in stream_items
+            }
+        else:
+            streams = {"no_split": _narrow_one_stream(
+                group, candidates, None, n_cols, ctx, narrow_fn, escalations)}
+        results[group.key] = {"status": "ok", "reason": None,
+                              "mode": mode, "streams": streams}
     return results

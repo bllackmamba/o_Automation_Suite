@@ -326,15 +326,20 @@ COMP_MAP   = {r[1]: r[3] for r in CF_ROWS}
 # docs/FORMULA_REGISTRY_PLAN.md.
 @dataclass(frozen=True)
 class FormulaGroup:
-    key: str                        # "G1".."G4"
+    key: str                          # "G1".."G4"
     label: str
-    components: tuple[str, ...]     # tokens fed to execute_collation
-    escalate: str                   # ESCALATIONS key; fired when above target_range
-    target_range: tuple[int, int]   # per-group survivor window (no global default)
+    components: tuple[str, ...]       # tokens fed to execute_collation
+    escalate: str                     # ESCALATIONS key; fired when above target_range
+    target_range: tuple[int, int]     # per-group survivor window (no global default)
+    # DEFAULT split behaviour (not a hard rule — overridable per run via
+    # _run_formula_groups(split_override=...)). True → narrow once per Main Data
+    # stream (Repeat/No_Repeat); False → narrow once, independent of the split
+    # (for groups like R whose narrowing never touches Main Data).
+    uses_main_data_split: bool = True
 
 
 FORMULA_GROUPS = [
-    FormulaGroup("G1", "R",           ("R",),                    "spread3_borderline",          (10, 20)),
+    FormulaGroup("G1", "R",           ("R",),                    "spread3_borderline",          (10, 20), False),
     FormulaGroup("G2", "D",           ("D",),                    "rule9_boundary_aggressive",   (10, 20)),
     FormulaGroup("G3", "B1",          ("B1",),                   "shallow_anchor_exclude_hold", (10, 20)),
     FormulaGroup("G4", "Ep+So+Sp+B2", ("Ep", "So", "Sp", "B2"),  "rule9_boundary_aggressive",   (10, 20)),

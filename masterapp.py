@@ -5768,6 +5768,13 @@ elif page == "🖥️ Container Dashboards":
                 f"RefGroup (newest {_gkey} draw): {_fg_ref} · Main Data "
                 f"{len(main_df):,} rows × {len(_fg_ncols)} number-cols · "
                 f"pool 1–{_fg_pool} · target window [10, 20]")
+            # R (G1) narrows once by default (it compares against the reference
+            # draw, never Main Data), so the split is skipped for it. Tick to run
+            # R per-stream anyway for research/tracing — passed as split_override.
+            _fg_split_g1 = st.checkbox(
+                "🔬 Also run R (G1) against the Repeat/No_Repeat split "
+                "(research/trace — R defaults to a single pass)",
+                value=False, key=f"fg_split_g1_{db}")
             if not _fg_ncols:
                 st.error("Could not detect Main Data number columns.")
             elif st.button("🧩 Run 4 formula groups", key=f"fg_run_{db}",
@@ -5786,7 +5793,8 @@ elif page == "🖥️ Container Dashboards":
                         pool=_fg_pool, pick=_fg_pick, game_key=_gkey)
                     _fg_results = _run_formula_groups(
                         FORMULA_GROUPS, execute_collation, _fg_split,
-                        _fg_ncols, _fg_ctx)
+                        _fg_ncols, _fg_ctx,
+                        split_override={"G1": True} if _fg_split_g1 else None)
                 _fg_m = _fg_split.get("_meta", {})
                 st.success(
                     f"✅ Split {'rebuilt' if _fg_m.get('rebuilt') else 'from cache'}"
