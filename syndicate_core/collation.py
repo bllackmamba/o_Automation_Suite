@@ -15,6 +15,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from syndicate_core.escalation import ESCALATIONS
+
 __all__ = [
     "_to_w_rows",
     "_compute_sc_block",
@@ -22,6 +24,8 @@ __all__ = [
     "_save_sc_block",
     "_load_sc_blocks",
     "_run_sc_auto",
+    "_default_narrow",
+    "_run_formula_groups",
 ]
 
 # Carry-forward flags used by _run_sc_auto callers
@@ -327,4 +331,97 @@ def _run_sc_auto(
                             "reason": "_compute_sc_block returned empty"}
             continue
         results[var] = {"status": "ok", "distributions": counts_dict, "path": None}
+    return results
+
+
+# ── Formula-group runner (4-group RefGroup-split restructure) ──────────────────
+
+def _default_narrow(candidates_df, stream_df, n_cols, *, ctx):
+    """Default per-stream narrowing — PASS-THROUGH seam.
+
+    Returns the candidate set untouched. The real narrowing criterion (Rule 2
+    beyond w1 / the Rule 6 Selected/Unselected boundary) is an OPEN question in
+    the LOCKED rules, so this is a seam like the escalation stubs: the runner's
+    control flow is real and tested, and the survivor rule drops in later without
+    signature churn. Signature mirrors the escalations so either can be injected.
+    """
+    logging.info("default_narrow not yet tuned — pass-through (%d candidates)",
+                 len(candidates_df))
+    return candidates_df
+
+
+def _narrow_one_stream(group, candidates, stream_df, n_cols, ctx,
+                       narrow_fn, escalations) -> dict:
+    """Narrow one group's candidates against one Main Data stream.
+
+    Applies ``narrow_fn`` then, only when the survivor count is ABOVE the
+    group's target_range, the named escalation. Below the window is log-only
+    (escalation cannot manufacture rows); still-out-of-range after escalation is
+    flagged ``out_of_range_after_escalation`` but let through unblocked. Any
+    exception is caught and reported so one stream never blocks the others.
+    """
+    lo, hi = group.target_range
+    try:
+        narrowed = narrow_fn(candidates, stream_df, n_cols, ctx=ctx)
+        n = len(narrowed)
+        escalated, flag = False, None
+        if n > hi:
+            fn = escalations.get(group.escalate)
+            if fn is None:
+                return {"status": "error",
+                        "reason": f"unknown escalation {group.escalate!r}"}
+            narrowed = fn(narrowed, stream_df, n_cols, ctx=ctx)
+            n = len(narrowed)
+            escalated = True
+            if not (lo <= n <= hi):
+                flag = "out_of_range_after_escalation"
+        elif n < lo:
+            flag = "below_target"
+        return {"status": "ok", "n": n, "escalated": escalated, "flag": flag}
+    except Exception as ex:
+        logging.warning("_run_formula_groups [%s/%s]: narrow error: %s",
+                        group.key, getattr(stream_df, "attrs", {}), ex)
+        return {"status": "error", "reason": str(ex)}
+
+
+def _run_formula_groups(groups, collate_fn, split, n_cols, ctx, *,
+                        narrow_fn=_default_narrow, escalations=ESCALATIONS) -> dict:
+    """Run each formula group against the Repeat / No_Repeat Main Data split.
+
+    Registry-driven, formula-agnostic (everything comes from ``group``), and
+    skip-and-log: one group's failure never blocks the others. ``collate_fn`` is
+    injected (``execute_collation`` lives in the UI layer and can't be imported
+    here); it maps a group's components tuple to that group's candidate CVI.
+    ``split`` is the main_split output — any non-stream key (e.g. ``_meta``) is
+    ignored.
+
+    Returns::
+
+        {group.key: {"status": "ok"|"skipped"|"error",
+                     "reason": str | None,
+                     "streams": {stream_name: {...per-stream status...}}}}
+    """
+    stream_items = [(k, v) for k, v in split.items() if not str(k).startswith("_")]
+    results: dict = {}
+    for group in groups:
+        try:
+            candidates = collate_fn(group.components)
+        except Exception as ex:
+            logging.warning("_run_formula_groups [%s]: collate failed: %s",
+                            group.key, ex)
+            results[group.key] = {"status": "error",
+                                  "reason": f"collate: {ex}", "streams": {}}
+            continue
+        if candidates is None or (hasattr(candidates, "empty") and candidates.empty):
+            logging.warning("_run_formula_groups [%s]: no candidates — skipping",
+                            group.key)
+            results[group.key] = {"status": "skipped",
+                                  "reason": "no candidates", "streams": {}}
+            continue
+        streams = {
+            name: _narrow_one_stream(group, candidates, stream_df, n_cols, ctx,
+                                     narrow_fn, escalations)
+            for name, stream_df in stream_items
+        }
+        results[group.key] = {"status": "ok", "reason": None, "streams": streams}
     return results
