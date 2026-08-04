@@ -5768,13 +5768,6 @@ elif page == "🖥️ Container Dashboards":
                 f"RefGroup (newest {_gkey} draw): {_fg_ref} · Main Data "
                 f"{len(main_df):,} rows × {len(_fg_ncols)} number-cols · "
                 f"pool 1–{_fg_pool} · target window [10, 20]")
-            # R (G1) narrows once by default (it compares against the reference
-            # draw, never Main Data), so the split is skipped for it. Tick to run
-            # R per-stream anyway for research/tracing — passed as split_override.
-            _fg_split_g1 = st.checkbox(
-                "🔬 Also run R (G1) against the Repeat/No_Repeat split "
-                "(research/trace — R defaults to a single pass)",
-                value=False, key=f"fg_split_g1_{db}")
             if not _fg_ncols:
                 st.error("Could not detect Main Data number columns.")
             elif st.button("🧩 Run 4 formula groups", key=f"fg_run_{db}",
@@ -5793,8 +5786,7 @@ elif page == "🖥️ Container Dashboards":
                         pool=_fg_pool, pick=_fg_pick, game_key=_gkey)
                     _fg_results = _run_formula_groups(
                         FORMULA_GROUPS, execute_collation, _fg_split,
-                        _fg_ncols, _fg_ctx,
-                        split_override={"G1": True} if _fg_split_g1 else None)
+                        _fg_ncols, _fg_ctx)
                 _fg_m = _fg_split.get("_meta", {})
                 st.success(
                     f"✅ Split {'rebuilt' if _fg_m.get('rebuilt') else 'from cache'}"
@@ -5810,17 +5802,28 @@ elif page == "🖥️ Container Dashboards":
                         _fg_rows.append({
                             "Group": _grp_key, "Components": _fg_comp,
                             "Stream": "—", "Status": _fg_gr["status"],
-                            "Survivors": "—", "Escalated": "—",
+                            "Survivors": "—", "Unit": "—", "Escalated": "—",
                             "Flag/Reason": _fg_gr.get("reason") or "—"})
                         continue
                     for _fg_sn, _fg_s in _fg_gr["streams"].items():
+                        # Survivors count means different things per unit —
+                        # "main_data_rows" (Main Data rows kept by the pivot) vs
+                        # "candidates" (candidate rows). Label it explicitly so a
+                        # 4.87M pivot count is never read as surviving candidates.
+                        _fg_unit = _fg_s.get("unit", "—")
+                        _fg_flag = _fg_s.get("flag") or _fg_s.get("reason") or "—"
+                        # A target_range flag on a non-candidate unit is an artifact
+                        # of comparing Main-Data-scale counts to a candidate window
+                        # (not a real signal until the later per-row chain exists).
+                        if (not _fg_s.get("target_range_meaningful", True)
+                                and _fg_s.get("flag")):
+                            _fg_flag = f"{_fg_s['flag']} (target n/a — {_fg_unit})"
                         _fg_rows.append({
                             "Group": _grp_key, "Components": _fg_comp,
                             "Stream": _fg_sn, "Status": _fg_s["status"],
-                            "Survivors": _fg_s.get("n", "—"),
+                            "Survivors": _fg_s.get("n", "—"), "Unit": _fg_unit,
                             "Escalated": _fg_s.get("escalated", "—"),
-                            "Flag/Reason": (_fg_s.get("flag")
-                                            or _fg_s.get("reason") or "—")})
+                            "Flag/Reason": _fg_flag})
                 _fg_tbl = pd.DataFrame(_fg_rows)
                 show_paginated_df(_fg_tbl, key=f"fg_res_{db}",
                                   use_container_width=True, hide_index=True)

@@ -10,7 +10,7 @@ __all__ = [
     # formula / dashboard config
     "CF_ROWS", "DASHBOARDS", "COMP_MAP",
     # formula-group registry (4-group RefGroup-split restructure)
-    "FormulaGroup", "FORMULA_GROUPS",
+    "FormulaGroup", "FORMULA_GROUPS", "NARROW_ROUTES",
     # lotto metadata
     "LOTTO_TYPES",
     # geography
@@ -331,19 +331,34 @@ class FormulaGroup:
     components: tuple[str, ...]       # tokens fed to execute_collation
     escalate: str                     # ESCALATIONS key; fired when above target_range
     target_range: tuple[int, int]     # per-group survivor window (no global default)
-    # DEFAULT split behaviour (not a hard rule — overridable per run via
-    # _run_formula_groups(split_override=...)). True → narrow once per Main Data
-    # stream (Repeat/No_Repeat); False → narrow once, independent of the split
-    # (for groups like R whose narrowing never touches Main Data).
+    # DEFAULT split behaviour (overridable per run via split_override). True →
+    # narrow once per Main Data stream (Repeat/No_Repeat). All four groups default
+    # True: R's real narrowing filters Main Data itself, so it REQUIRES the split
+    # (corrected 2026-08-05). The field stays for a future group that genuinely
+    # does not consume Main Data (set False; still overridable via split_override).
     uses_main_data_split: bool = True
+    # Narrowing strategy name → resolved to a callable via collation.NARROW_FNS,
+    # routed per (narrow, stream) through NARROW_ROUTES below. "default" = the
+    # pass-through stub; G1 uses "refgroup_w1" (RefGroup_w1 pivot, Repeat only).
+    narrow: str = "default"
 
 
 FORMULA_GROUPS = [
-    FormulaGroup("G1", "R",           ("R",),                    "spread3_borderline",          (10, 20), False),
+    FormulaGroup("G1", "R",           ("R",),                    "spread3_borderline",          (10, 20), True, "refgroup_w1"),
     FormulaGroup("G2", "D",           ("D",),                    "rule9_boundary_aggressive",   (10, 20)),
     FormulaGroup("G3", "B1",          ("B1",),                   "shallow_anchor_exclude_hold", (10, 20)),
     FormulaGroup("G4", "Ep+So+Sp+B2", ("Ep", "So", "Sp", "B2"),  "rule9_boundary_aggressive",   (10, 20)),
 ]
+
+# Per-(narrow strategy, stream) → narrowing-function NAME (resolved via
+# collation.NARROW_FNS). Only pairs listed here get special narrowing; every
+# other (narrow, stream) pair falls back to the runner's default pass-through.
+# This table is the ONLY place the "RefGroup_w1 pivot applies to the Repeat
+# stream only" fact lives — the runner does a plain dict lookup, never a
+# hardcoded group-key or stream-name branch.
+NARROW_ROUTES: dict[tuple[str, str], str] = {
+    ("refgroup_w1", "Repeat"): "refgroup_w1_pivot",
+}
 
 CHUNK_SIZE = 500_000  # rows per processing chunk
 
