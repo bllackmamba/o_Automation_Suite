@@ -233,6 +233,8 @@ from syndicate_core.pipeline import *
 from syndicate_core.matching import *
 from syndicate_core.generators import *
 from syndicate_core.collation import *
+from syndicate_core.main_split import load_or_build_split
+from syndicate_core.escalation import EscalationContext
 from syndicate_core.b_sync import *
 from syndicate_core.scanners import (
     parse_cvi_filename, cvi_date_from_mtime, resolve_main_data_choices)
@@ -5749,6 +5751,93 @@ elif page == "🖥️ Container Dashboards":
             else:
                 st.caption("No precomputed result found yet — run the command "
                            "above, then reopen this dashboard.")
+
+    # ── Formula Groups (4-group · RefGroup split) ────────────────────────
+    # Runs the 4 formula groups (R / D / B1 / Ep+So+Sp+B2) against the Main
+    # Data pool split into Repeat/No_Repeat by Rule 1 (nonzero/zero vs the
+    # newest draw), via syndicate_core.collation._run_formula_groups. Narrowing
+    # + escalations are pass-through seams this pass; the target-window control
+    # flow and skip-and-log are live. execute_collation is passed as collate_fn
+    # (the runner lives in syndicate_core and can't import the UI layer). Lazy —
+    # nothing splits or runs until the expander is opened and the button clicked.
+    with st.expander("🧩 Formula Groups (4-group · RefGroup split)", expanded=False):
+        st.caption(
+            "Each group's candidates matched against the Main Data pool split "
+            "into Repeat/No_Repeat by Rule 1 (nonzero/zero vs the newest draw). "
+            "Narrowing + escalation are seams (not yet tuned); the target window "
+            "and skip-and-log are live.")
+        _fg_pick = int(_gcfg["pick"])
+        _fg_pool = int(_gcfg["pool"])
+        _fg_hist_path = (_gdirs.get("SinceLast", _gdirs.get("Base", Path(".")))
+                         / "draw_history.csv")
+        _fg_ref = load_newest_reference(_fg_hist_path, _fg_pick)
+        if main_df is None or main_df.empty:
+            st.info("Load Main Data above to run formula groups.")
+        elif _fg_ref is None:
+            st.warning("No usable newest draw — load draw history "
+                       "(Stats → Draw History → Fetch) to set the RefGroup split.")
+        else:
+            _fg_ncols = [c for c in main_df.columns
+                         if re.match(r'^n?\d+$', str(c), re.I)]
+            if not _fg_ncols:
+                _fg_ncols = [c for c in main_df.columns
+                             if pd.api.types.is_numeric_dtype(main_df[c])]
+            st.caption(
+                f"RefGroup (newest {_gkey} draw): {_fg_ref} · Main Data "
+                f"{len(main_df):,} rows × {len(_fg_ncols)} number-cols · "
+                f"pool 1–{_fg_pool} · target window [10, 20]")
+            if not _fg_ncols:
+                st.error("Could not detect Main Data number columns.")
+            elif st.button("🧩 Run 4 formula groups", key=f"fg_run_{db}",
+                           type="primary"):
+                _fg_cache = _gdirs["Main_Data"] / "_split_cache"
+                try:
+                    _fg_hist_df = (pd.read_csv(_fg_hist_path, dtype=str)
+                                   if _fg_hist_path.exists() else None)
+                except Exception:
+                    _fg_hist_df = None
+                with st.spinner("Splitting Main Data by RefGroup + running groups…"):
+                    _fg_split = load_or_build_split(
+                        main_df, _fg_ncols, _fg_ref, _fg_cache)
+                    _fg_ctx = EscalationContext(
+                        ref_numbers=tuple(_fg_ref), history_df=_fg_hist_df,
+                        pool=_fg_pool, pick=_fg_pick, game_key=_gkey)
+                    _fg_results = _run_formula_groups(
+                        FORMULA_GROUPS, execute_collation, _fg_split,
+                        _fg_ncols, _fg_ctx)
+                _fg_m = _fg_split.get("_meta", {})
+                st.success(
+                    f"✅ Split {'rebuilt' if _fg_m.get('rebuilt') else 'from cache'}"
+                    f" — Repeat {_fg_m.get('n_repeat', 0):,} / "
+                    f"No_Repeat {_fg_m.get('n_no_repeat', 0):,}. "
+                    f"Ran {len(_fg_results)} groups.")
+                _fg_rows = []
+                for _grp_key, _fg_gr in _fg_results.items():
+                    _grp = next((g for g in FORMULA_GROUPS
+                                 if g.key == _grp_key), None)
+                    _fg_comp = "+".join(_grp.components) if _grp else "—"
+                    if _fg_gr["status"] != "ok":
+                        _fg_rows.append({
+                            "Group": _grp_key, "Components": _fg_comp,
+                            "Stream": "—", "Status": _fg_gr["status"],
+                            "Survivors": "—", "Escalated": "—",
+                            "Flag/Reason": _fg_gr.get("reason") or "—"})
+                        continue
+                    for _fg_sn, _fg_s in _fg_gr["streams"].items():
+                        _fg_rows.append({
+                            "Group": _grp_key, "Components": _fg_comp,
+                            "Stream": _fg_sn, "Status": _fg_s["status"],
+                            "Survivors": _fg_s.get("n", "—"),
+                            "Escalated": _fg_s.get("escalated", "—"),
+                            "Flag/Reason": (_fg_s.get("flag")
+                                            or _fg_s.get("reason") or "—")})
+                _fg_tbl = pd.DataFrame(_fg_rows)
+                show_paginated_df(_fg_tbl, key=f"fg_res_{db}",
+                                  use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇ Formula-group results CSV", to_csv_bytes(_fg_tbl),
+                    f"formula_groups_{_gkey}.csv", "text/csv",
+                    key=f"fg_dl_{db}")
 
     # ── B1 Parallel Main-Count — CVI rows vs the whole B1 source ─────────
     # Same per-row engine as above, but the pool is B1 (unfiltered — B1's
