@@ -1,4 +1,5 @@
 from pathlib import Path
+from dataclasses import dataclass
 import shutil as _shutil
 
 __all__ = [
@@ -8,6 +9,8 @@ __all__ = [
     "GAMES_CFG", "GAME_KEYS", "GAME_LABELS", "GAME_NAME_MAP",
     # formula / dashboard config
     "CF_ROWS", "DASHBOARDS", "COMP_MAP",
+    # formula-group registry (4-group RefGroup-split restructure)
+    "FormulaGroup", "FORMULA_GROUPS",
     # lotto metadata
     "LOTTO_TYPES",
     # geography
@@ -313,6 +316,29 @@ CF_ROWS = [
 ]
 DASHBOARDS = [f"1n & {r[1]}" for r in CF_ROWS]
 COMP_MAP   = {r[1]: r[3] for r in CF_ROWS}
+
+
+# ── Formula-group registry (4-group RefGroup-split restructure) ───────────────
+# Regroups the candidate-variable axis into 4 groups, each matched against a
+# Main Data pool split into Repeat/No_Repeat (Rule 1). `escalate` is resolved by
+# name via syndicate_core.escalation.ESCALATIONS (string, not a callable, so this
+# module stays dependency-free and the runner stays formula-agnostic). See
+# docs/FORMULA_REGISTRY_PLAN.md.
+@dataclass(frozen=True)
+class FormulaGroup:
+    key: str                        # "G1".."G4"
+    label: str
+    components: tuple[str, ...]     # tokens fed to execute_collation
+    escalate: str                   # ESCALATIONS key; fired when above target_range
+    target_range: tuple[int, int]   # per-group survivor window (no global default)
+
+
+FORMULA_GROUPS = [
+    FormulaGroup("G1", "R",           ("R",),                    "spread3_borderline",          (10, 20)),
+    FormulaGroup("G2", "D",           ("D",),                    "rule9_boundary_aggressive",   (10, 20)),
+    FormulaGroup("G3", "B1",          ("B1",),                   "shallow_anchor_exclude_hold", (10, 20)),
+    FormulaGroup("G4", "Ep+So+Sp+B2", ("Ep", "So", "Sp", "B2"),  "rule9_boundary_aggressive",   (10, 20)),
+]
 
 CHUNK_SIZE = 500_000  # rows per processing chunk
 
