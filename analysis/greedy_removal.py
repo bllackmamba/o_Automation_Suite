@@ -144,7 +144,7 @@ def removal_chain(pool_masks, pool_nums, Rmask, tb, rem0, variant, cand):
     pm = pool_masks.copy(); pn = pool_nums.copy()
     heap = [(-rem0[i], tb[i], i) for i in cand]
     heapq.heapify(heap)
-    applied = set(); order = []; traj = [int(pm.size)]
+    applied = set(); order = []; traj = [int(pm.size)]; final6 = None
     t0 = time.time()
     while heap:
         neg, tbv, i = heapq.heappop(heap)
@@ -160,6 +160,10 @@ def removal_chain(pool_masks, pool_nums, Rmask, tb, rem0, variant, cand):
         surv = (pm & Rmask[i]) != np.uint64(0)
         pm = pm[surv]; pn = pn[surv]
         applied.add(i); order.append(i); traj.append(int(pm.size))
+        # Open Thread #1 snapshot: capture the surviving combos by NUMBER-CONTENT
+        # the instant the pool hits 6 (content identity, not load-order index).
+        if pm.size == 6:
+            final6 = frozenset(tuple(int(x) for x in row) for row in pn)
         # standing Rule-1 invariant on the SURVIVING pool (Repeat stream)
         if pn.size:
             smp = pn if pn.shape[0] <= SAMPLE_INV else \
@@ -170,7 +174,7 @@ def removal_chain(pool_masks, pool_nums, Rmask, tb, rem0, variant, cand):
         if pm.size == 0:
             break
     return {"traj": traj, "order": order, "final": int(pm.size),
-            "steps": len(order), "secs": time.time()-t0}
+            "steps": len(order), "secs": time.time()-t0, "final6": final6}
 
 
 def removal_chain_least(pool_masks, pool_nums, Rmask, tb, rem0, variant, cand):
@@ -231,6 +235,100 @@ def plateau_report(traj):
         else:
             cur = 0
     return cliff, (best_start, best_len)
+
+
+def artifact_check(final6, ref):
+    """Step 3 degenerate-structure test on the six surviving combos.
+
+    ``final6`` is a frozenset of 6 combos (each a tuple of ints); ``ref`` is the
+    RefGroup number set (D4687). Returns ``(is_degenerate, reasons)``. Catches the
+    same shape as the old "20" ({1,2,19} fixed + every C(6,3) subset of RefGroup):
+      (a) fixed common core + the residual varying exactly as a full C(n,k);
+      (b) all residual variation confined to RefGroup's own numbers (closed form).
+    """
+    ref_set = set(int(n) for n in ref)
+    combos = [set(int(x) for x in c) for c in final6]
+    core = set.intersection(*combos) if combos else set()
+    varying = [tuple(sorted(c - core)) for c in combos]
+    var_universe = set().union(*(set(v) for v in varying)) if varying else set()
+    slot_sizes = {len(v) for v in varying}
+    reasons = []
+    degenerate = False
+    # (a) fixed core + full C(n,k) enumeration of the residual slots
+    if len(slot_sizes) == 1:
+        k = next(iter(slot_sizes))
+        full = {tuple(sorted(s)) for s in combinations(sorted(var_universe), k)}
+        if set(varying) == full and len(final6) == math.comb(len(var_universe), k):
+            degenerate = True
+            reasons.append(
+                f"(a) fixed core {sorted(core)} + every "
+                f"C({len(var_universe)},{k})={math.comb(len(var_universe), k)} "
+                f"subset of {sorted(var_universe)} — combinatorial shadow, same "
+                f"shape as the '20' artifact")
+    # (b) residual variation confined to RefGroup's own numbers
+    if var_universe and var_universe <= ref_set:
+        degenerate = True
+        reasons.append(
+            f"(b) all variation lies within RefGroup {sorted(ref_set)} "
+            f"(varying numbers {sorted(var_universe)}) — closed-form enumeration "
+            f"of RefGroup, not a real narrowing")
+    if not reasons:
+        reasons.append(
+            f"no degenerate structure detected: core={sorted(core)}, "
+            f"per-combo residual sizes={sorted(slot_sizes)}, variation universe="
+            f"{sorted(var_universe)} not ⊆ RefGroup")
+    return degenerate, reasons
+
+
+def report_final6(good):
+    """Open Thread #1: content-stability of the remove-most 'final 6' (2a/2b/3)."""
+    print("\n" + "=" * 70)
+    print("CONTENT-STABILITY OF THE 'FINAL 6' (Open Thread #1)")
+    snaps = {v: r.get("final6") for v, r in good.items() if r.get("final6")}
+    missing = [v for v, r in good.items() if not r.get("final6")]
+    if missing:
+        print(f"  WARNING: no 6-combo step captured for: {missing}")
+    if not snaps:
+        print("  no snapshots captured — nothing to compare."); return
+    for v, s in snaps.items():
+        print(f"  {v}: {sorted(tuple(sorted(c)) for c in s)}")
+    # (2a) exact set equality
+    distinct = set(snaps.values())
+    all_same = len(distinct) == 1
+    print(f"\n[2a] exact set equality across {len(snaps)} variants: {all_same}  "
+          f"(distinct 6-sets: {len(distinct)})", flush=True)
+    if not all_same:
+        # (2b) pairwise Jaccard matrix
+        print("\n[2b] pairwise Jaccard (6-set identity):")
+        vv = list(snaps)
+        for a in range(len(vv)):
+            for b in range(a + 1, len(vv)):
+                A, B = snaps[vv[a]], snaps[vv[b]]
+                j = len(A & B) / len(A | B) if (A | B) else 1.0
+                print(f"    {vv[a]} vs {vv[b]}: ∩={len(A & B)} ∪={len(A | B)} "
+                      f"Jaccard={j:.3f}")
+        print("    VERDICT: 'final 6 as-is' UNSTABLE → dead lead "
+              "(note any agreeing subset as a footnote, not a result).")
+        return
+    # (3) artifact check on the single agreed 6-set
+    final6 = next(iter(distinct))
+    degen, reasons = artifact_check(final6, REFGROUP_D4687)
+    print("\n[3] artifact / degenerate-structure check:")
+    for rr in reasons:
+        print(f"    {rr}")
+    if degen:
+        print("    VERDICT: DEGENERATE → artifact, same class as the '20'. "
+              "Dead lead; log as retracted.")
+        return
+    # final Rule-1 gate (confirm rather than assume)
+    arr = np.array([sorted(c) for c in final6], dtype=np.int32)
+    try:
+        assert_pool_invariant_array(arr, "Repeat", step_label="final-6 gate")
+        print("    Rule-1 gate: PASS (all 6 combos in the Repeat pool).")
+        print("    VERDICT: REAL non-zero-floor candidate. Next: design the "
+              "early-stop rule (never apply the step that takes pool below 6).")
+    except PoolInvariantViolation as e:
+        print(f"    Rule-1 gate: FAIL — {e}")
 
 
 def main():
@@ -303,6 +401,21 @@ def main():
             for k, s in enumerate(r["traj"]):
                 w.writerow([v, k, s])
     print(f"\ntrajectories → {out.relative_to(REPO)}")
+
+    # ── Open Thread #1: content-stability of the remove-most 'final 6' ──
+    if mode == "most":
+        report_final6(good)
+        snap_out = REPO / "analysis" / "greedy_removal_final6_snapshot.csv"
+        with snap_out.open("w", newline="") as f:
+            w = csv.writer(f); w.writerow(["variant", "combo_idx"] +
+                                          [f"n{i}" for i in range(1, 7)])
+            for v, r in good.items():
+                s = r.get("final6")
+                if not s:
+                    continue
+                for ci, combo in enumerate(sorted(tuple(sorted(c)) for c in s)):
+                    w.writerow([v, ci] + list(combo))
+        print(f"final-6 snapshot → {snap_out.relative_to(REPO)}")
 
 
 if __name__ == "__main__":

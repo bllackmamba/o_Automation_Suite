@@ -119,3 +119,37 @@ full match matrix, recomputed cell-exact against `Match_Matrix_969` (0 mismatche
 Companion result: the **union-coverage** greedy ([R_GREEDY_COVER](R_GREEDY_COVER_ORDER_INDEPENDENCE.md))
 is order-independent in *both* shape and rows — a unique 4,368-row cover (= the containment-maximal
 rows ±1). Intersection-removal is the weaker form: shape is forced, row-identity is not.
+
+---
+
+## Addendum (2026-08-09) — Open Thread #1 "final 6" RETRACTED (unstable + degenerate)
+
+Spec `syndicate_core/spec_final6_content_stability_check.md` asked whether the remove-most
+`225 → 6` step is a real non-zero-floor production candidate or a tie-break artifact like the old
+"20". Instrumented `greedy_removal.py` to snapshot the **6 surviving combos by number-content**
+(`frozenset` of the combo's numbers — content identity, not load-order index; note the pool being
+shrunk is COMBOS, not Repeat_R rows, so the spec's `row_id`-on-a-row phrasing was a mis-description).
+Gate re-passed (0 mismatches vs `Match_Matrix_969`).
+
+**[2a] exact set equality = FALSE — 4 distinct 6-sets across the 7 tie-breaks.** Size-trajectory is
+identical (`…4340 → 225 → 6 → 0`) but combo *identity* is not; pairwise Jaccard is 1.000 within
+groups / 0.000 between:
+
+| group | variants | the six combos |
+|---|---|---|
+| A | V1, V3, R1 | `{1,7,15,27,41}` + one of RefGroup `{3,6,9,14,21,22}` |
+| B | V2, V4 | `{1,7,15,27,38}` + one of RefGroup |
+| C | R7 | `{7,15,27,38,41}` + one of RefGroup |
+| D | R42 | `{1,7,15,38,41}` + one of RefGroup |
+
+**Doubly dead:** each of the 4 sets is itself the "20"-class degenerate shadow — a fixed 5-number
+anchor core + **every `C(6,1)` of RefGroup D4687**, fully enumerated (same signature as the old "20":
+`{1,2,19}` + every `C(6,3)` of RefGroup). The tie-break's only freedom is which anchor core it lands
+on (swapping among `1/27/38/41`); the RefGroup slot is always the full closed-form sweep. Would have
+failed the step-3 artifact check even had 2a passed — confirming the asymmetry the spec warned of:
+size-stability was real, meaningfulness was not.
+
+**Verdict: retracted.** Not a real narrowing result; no early-stop rule pursued. Reusable
+degenerate-structure detector added (`artifact_check`/`report_final6` in `greedy_removal.py`) — none
+existed before; the "20" conclusion had lived only as prose. Snapshot: `greedy_removal_final6_snapshot.csv`.
+Next: Open Thread #3 (Direction A / B1 diagnostic).
