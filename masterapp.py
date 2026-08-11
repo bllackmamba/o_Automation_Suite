@@ -3198,14 +3198,25 @@ elif page == "🧩 Variable Inputs":
             # range is a clean drop-in — the same reader shape either way.
             _sd_dir       = _gdirs.get("SinceLast", _gdirs.get("Base", Path(".")))
             _sd_hist_path = _sd_dir / "draw_history.csv"
+            # Default = Lottolyzer (recent): it IS exactly the externally
+            # validated window (draws ~4403→4701, the 149-draw B1 overlap + the
+            # confirmed top draw 4701) with zero extrapolation. The B1 splice
+            # extends deeper (→2761) but its draw-number LABELS below the overlap
+            # are extrapolated and not yet externally verified, so it stays as
+            # built-but-parked infrastructure — opt-in only until label
+            # verification is done (deferred follow-up; see full_history.py).
             _sd_src = st.radio(
                 "History source:",
                 ["Lottolyzer (recent)", "Full range (B1 splice)"],
+                index=0,
                 horizontal=True,
                 key="sd_hist_source",
-                help="Full range splices B1's deep win history with draw_history "
-                     "(top draw + numbering). The overlap is sanity-checked — the "
-                     "join is only offered when the shared draws agree.")
+                help="Lottolyzer (recent) = the externally validated window "
+                     "(~4403→4701), the safe default for pattern work. Full range "
+                     "splices B1's deep history (→2761) with draw_history; the "
+                     "overlap is sanity-checked and the join is only offered when "
+                     "the shared draws agree, but its deep draw-number labels are "
+                     "extrapolated and pending external verification — use with care.")
 
             _sd_hist = pd.DataFrame()
             _sd_splice_rep = None

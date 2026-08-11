@@ -24,6 +24,16 @@ it **validates the overlap**: the draws present in BOTH sources must agree on
 their winning-number sets before the join is trusted (``overlap_agree``). This is
 pure/import-safe (no Streamlit, no I/O beyond the DataFrames handed in) so it is
 unit-testable; masterapp stays UI-only.
+
+SCOPE NOTE (2026-08-11 decision): only the OVERLAP-validated window
+(~4403->4701 for sat: the 149-draw B1 n draw_history overlap + the confirmed top
+draw 4701) is trusted for pattern-finding today. The deeper B1-only tail
+(2761->4403) is real winning-number data, but its per-draw NUMBER LABELS are
+extrapolated here (anchor - step*i), NOT externally verified -- so that range is
+built-but-PARKED infrastructure. **Deferred follow-up: externally verify the
+deep draw-number labels** before relying on the 2761->4403 range. Until then the
+UI defaults History source to "Lottolyzer (recent)" (= the validated window) and
+the splice is opt-in only.
 """
 from __future__ import annotations
 
