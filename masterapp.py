@@ -240,6 +240,7 @@ from syndicate_core.scanners import (
     parse_cvi_filename, cvi_date_from_mtime, resolve_main_data_choices)
 from syndicate_core.stacked_blocks import (
     render_columns, column_pads, visible_group_count, group_rail_flags)
+from syndicate_core.full_history import build_full_range_df
 from syndicate_core.refgroup import (
     SET_LABEL as _REFGROUP_LABEL,
     build_ref_group_piece,
@@ -3188,15 +3189,64 @@ elif page == "🧩 Variable Inputs":
                 '</div>',
                 unsafe_allow_html=True)
 
-            _sd_hist_path = (
-                _gdirs.get("SinceLast", _gdirs.get("Base", Path(".")))
-                / "draw_history.csv"
-            )
-            _sd_hist = (
-                pd.read_csv(_sd_hist_path, dtype=str)
-                if _sd_hist_path.exists()
-                else pd.DataFrame()
-            )
+            # ── History source ────────────────────────────────────────────
+            # "Lottolyzer (recent)" = draw_history.csv as fetched (~150 draws).
+            # "Full range (B1 splice)" = B1 win history (deep, → ~2761) spliced
+            # with draw_history for the top draw + explicit numbering, validated
+            # on the overlap (see syndicate_core.full_history). SL/blocks are
+            # source-agnostic (computed from the draw list itself), so the full
+            # range is a clean drop-in — the same reader shape either way.
+            _sd_dir       = _gdirs.get("SinceLast", _gdirs.get("Base", Path(".")))
+            _sd_hist_path = _sd_dir / "draw_history.csv"
+            _sd_src = st.radio(
+                "History source:",
+                ["Lottolyzer (recent)", "Full range (B1 splice)"],
+                horizontal=True,
+                key="sd_hist_source",
+                help="Full range splices B1's deep win history with draw_history "
+                     "(top draw + numbering). The overlap is sanity-checked — the "
+                     "join is only offered when the shared draws agree.")
+
+            _sd_hist = pd.DataFrame()
+            _sd_splice_rep = None
+            if _sd_src == "Full range (B1 splice)":
+                _b1p = b1_path(_gkey)
+                if _b1p is None or not _b1p.exists():
+                    st.markdown(
+                        '<div class="warn">⚠️ No B1 win history for this game — '
+                        'full range needs B1. Falling back to the lottolyzer file.</div>',
+                        unsafe_allow_html=True)
+                elif not _sd_hist_path.exists():
+                    st.markdown(
+                        '<div class="warn">⚠️ No draw_history.csv to anchor the splice. '
+                        'Fetch it (Stats tab) first.</div>', unsafe_allow_html=True)
+                else:
+                    try:
+                        _sd_hist, _sd_splice_rep = build_full_range_df(
+                            pd.read_csv(_b1p, dtype=str),
+                            pd.read_csv(_sd_hist_path, dtype=str),
+                            int(_gcfg.get("pick", 6)))
+                        if not _sd_splice_rep["overlap_agree"]:
+                            _mm = _sd_splice_rep["overlap_mismatches"]
+                            st.markdown(
+                                f'<div class="warn">⚠️ Splice NOT trusted: '
+                                f'{len(_mm)} overlapping draw(s) disagree between B1 and '
+                                f'draw_history (e.g. draw {_mm[0]["dh_draw"]}). '
+                                f'Using lottolyzer only.</div>', unsafe_allow_html=True)
+                            _sd_hist = pd.DataFrame()
+                    except Exception as _sd_ex:
+                        st.markdown(
+                            f'<div class="warn">⚠️ Could not build full range: {_sd_ex}. '
+                            f'Using lottolyzer only.</div>', unsafe_allow_html=True)
+                        _sd_hist = pd.DataFrame()
+
+            if _sd_hist.empty:   # fallback / default = the fetched lottolyzer file
+                _sd_hist = (
+                    pd.read_csv(_sd_hist_path, dtype=str)
+                    if _sd_hist_path.exists()
+                    else pd.DataFrame()
+                )
+
             if _sd_hist.empty:
                 st.markdown(
                     '<div class="warn">⚠️ No draw history loaded. '
@@ -3206,10 +3256,30 @@ elif page == "🧩 Variable Inputs":
                 _sd_pool      = _gcfg.get("pool", 45)
                 _sd_available = len(_sd_hist)
 
+                if _sd_splice_rep is not None and not _sd_hist.empty:
+                    st.caption(
+                        f"✅ Full range: {_sd_splice_rep['oldest_draw']}→"
+                        f"{_sd_splice_rep['newest_draw']} "
+                        f"({_sd_splice_rep['n_full']} draws) · overlap "
+                        f"{_sd_splice_rep['overlap_n']} draws all agree · "
+                        f"B1 {_sd_splice_rep['n_b1']} + top D"
+                        f"{','.join(_sd_splice_rep['top_from_dh'])} from lottolyzer")
+
                 _sd_n = st.slider(
                     "Number of draws to display:",
                     1, min(_sd_available, 10), min(4, _sd_available),
                     key="sd_n_draws")
+
+                # Window start — how many draws back from the newest the display
+                # window begins. 0 = newest (legacy behaviour); lets the fixed-
+                # width window slide across the full range instead of only the
+                # newest 10. SL is still computed against the FULL history.
+                _sd_start = 0
+                if _sd_available > _sd_n:
+                    _sd_start = st.slider(
+                        "Window start (draws back from newest):",
+                        0, _sd_available - _sd_n, 0,
+                        key="sd_win_start")
 
                 _sd_view = st.radio(
                     "View mode:",
@@ -3238,19 +3308,11 @@ elif page == "🧩 Variable Inputs":
                             result.append(int(tok))
                     return result
 
-                # Build rows list (newest-first) with enough look-back for SL computation
-                _sd_lookback = _sd_n + _sd_pool
-                _sd_rows: list = []
-                for _, _sdr in _sd_hist.head(_sd_lookback).iterrows():
-                    _sd_rows.append({
-                        "draw": str(_sdr.get("draw", "")),
-                        "date": str(_sdr.get("date", ""))[:10],
-                        "nums": set(_sd_parse_nums(_sdr.get("numbers", ""))),
-                    })
-
-                # FULL history (newest-first) — cascading seeds from the true
-                # oldest draw and walks forward through every draw, so it needs
-                # the entire file, not the display-window slice above.
+                # FULL history (newest-first) — all three views compute SL/lineage
+                # against the entire history (never a window slice); the display
+                # window (_sd_start.._sd_start+_sd_n) only selects which columns show.
+                # Cascading also seeds from the true oldest draw, so it needs the
+                # whole list regardless.
                 _sd_full: list = []
                 for _, _sdr in _sd_hist.iterrows():
                     _sd_full.append({
@@ -3347,7 +3409,8 @@ elif page == "🧩 Variable Inputs":
                     # and alignment logic lives in syndicate_core.stacked_blocks; this
                     # branch is render-only.
                     _bf_n     = min(_sd_n, len(_sd_full))
-                    _bf_dis   = list(range(_bf_n))                 # newest-first indices
+                    _bf_start = min(_sd_start, max(0, len(_sd_full) - _bf_n))
+                    _bf_dis   = list(range(_bf_start, _bf_start + _bf_n))  # window indices
                     _bf_cols  = render_columns(_bf_dis, _sd_full, _sd_pool)
                     _bf_pads  = column_pads(_bf_dis, _sd_full)
                     _CELL_H   = 22          # px — fixed so columns align cell-for-cell
@@ -3408,10 +3471,11 @@ elif page == "🧩 Variable Inputs":
                     # per-draw fresh/repeat caption (mirrors cascading)
                     _bf_caption = []
                     for _j in range(_bf_n):
-                        _draw = _sd_full[_j]
+                        _di   = _bf_dis[_j]
+                        _draw = _sd_full[_di]
                         _cur  = _draw["nums"]
-                        if _j + 1 < len(_sd_full):
-                            _prev = _sd_full[_j + 1]["nums"]
+                        if _di + 1 < len(_sd_full):
+                            _prev = _sd_full[_di + 1]["nums"]
                             _fr = sorted(_cur - _prev)
                             _rp = sorted(_cur & _prev)
                         else:
@@ -3425,7 +3489,7 @@ elif page == "🧩 Variable Inputs":
                     _bf_html = ["<div style='display:flex;flex-direction:row;gap:6px;"
                                 "overflow-x:auto;align-items:flex-start'>"]
                     for _j in range(_bf_n):
-                        _draw  = _sd_full[_j]
+                        _draw  = _sd_full[_bf_dis[_j]]
                         _rails = group_rail_flags(_bf_cols[_j])
                         _grp   = visible_group_count(_bf_cols[_j])
                         _bf_html.append(
@@ -3473,10 +3537,12 @@ elif page == "🧩 Variable Inputs":
                     st.markdown("".join(_bf_sw), unsafe_allow_html=True)
 
                     st.caption(
-                        f"Blocked flat — SL vs full {len(_sd_full)} draws; showing newest "
-                        f"{_bf_n} (newest left). Columns align recursively: the oldest "
-                        f"shown (D{_sd_full[_bf_n - 1]['draw']}) seeds the skeleton, so the "
-                        "slider sets the reference frame. Each newer column lifts its "
+                        f"Blocked flat — SL vs full {len(_sd_full)} draws; showing "
+                        f"{_bf_n} draws from D{_sd_full[_bf_dis[0]]['draw']} (left) back "
+                        f"to D{_sd_full[_bf_dis[-1]]['draw']} (newest left). Columns align "
+                        f"recursively: the oldest shown (D{_sd_full[_bf_dis[-1]]['draw']}) "
+                        "seeds the skeleton, so the slider sets the reference frame. "
+                        "Each newer column lifts its "
                         "winners to a top block and leaves their old cells as holes: "
                         "white = wall (no contrasting neighbour), brown = blocked "
                         "(caught by a group neighbour) — both persist across draws. "
@@ -3495,7 +3561,7 @@ elif page == "🧩 Variable Inputs":
                     # instead of collapsing into rows 1-6. The oldest displayed draw has
                     # no older neighbour, so it falls back to its own deck.
                     _sd_casc = _sd_cascading_order(_sd_full, _sd_pool)  # newest-first
-                    for _di in range(min(_sd_n, len(_sd_casc))):
+                    for _di in range(_sd_start, min(_sd_start + _sd_n, len(_sd_casc))):
                         _dl, _date, _ = _sd_casc[_di]
                         _inc = _di + 1 if _di + 1 < len(_sd_casc) else _di
                         _ord = _sd_casc[_inc][2]          # incoming (pre-reset) deck
@@ -3516,11 +3582,12 @@ elif page == "🧩 Variable Inputs":
                 else:
                     # Flat rank — each column ranked independently by its own SL
                     # (present order). The diagonal staircase emerges naturally as a
-                    # number's SL grows in older columns. Unchanged legacy behaviour.
-                    for _di in range(min(_sd_n, len(_sd_rows))):
-                        _ord, _sld = _sd_present_order(_di, _sd_rows, _sd_pool)
-                        _sd_draws_data.append((_sd_rows[_di]["draw"],
-                                               _sd_rows[_di]["date"],
+                    # number's SL grows in older columns. Uses the full history (so SL
+                    # look-back is never truncated) and honours the window offset.
+                    for _di in range(_sd_start, min(_sd_start + _sd_n, len(_sd_full))):
+                        _ord, _sld = _sd_present_order(_di, _sd_full, _sd_pool)
+                        _sd_draws_data.append((_sd_full[_di]["draw"],
+                                               _sd_full[_di]["date"],
                                                _ord, _sld))
 
                 if _sd_view == "Blocked flat (all_wt)":
