@@ -41,8 +41,9 @@ def main():
     dh_df = pd.read_csv(game_dirs(GAME)["SinceLast"] / "draw_history.csv", dtype=str)
     recs, rep = build_full_history(pd.read_csv(b1_path(GAME), dtype=str), dh_df, PICK)
     n = len(recs)
-    # drop_dead=True mirrors the export (dead all-hole bands not dragged newer).
-    cols = render_columns(list(range(n)), recs, POOL, drop_dead=True)
+    # Full export = fully-aligned view (window-global reclamation is a no-op when
+    # the whole range is displayed).
+    cols = render_columns(list(range(n)), recs, POOL)
     pads = column_pads(list(range(n)), recs)
     rails = [group_rail_flags(c) for c in cols]
 
@@ -63,7 +64,7 @@ def main():
     lo = next(i for i in range(n) if recs[i]["draw"] == "2779")
     hi = next(i for i in range(n) if recs[i]["draw"] == "2761")
     sl = list(range(lo, hi + 1))
-    win = render_columns(sl, recs, POOL, drop_dead=True); win_r = [group_rail_flags(c) for c in win]
+    win = render_columns(sl, recs, POOL); win_r = [group_rail_flags(c) for c in win]
     eq = all(cols[sl[m]] == win[m] and rails[sl[m]] == win_r[m] for m in range(len(sl)))
     print(f"(a) slice == isolated window: {eq}")
     assert eq

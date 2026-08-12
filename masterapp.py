@@ -239,7 +239,8 @@ from syndicate_core.b_sync import *
 from syndicate_core.scanners import (
     parse_cvi_filename, cvi_date_from_mtime, resolve_main_data_choices)
 from syndicate_core.stacked_blocks import (
-    render_columns, column_pads, visible_group_count, group_rail_flags)
+    render_columns, column_pads, visible_group_count, group_rail_flags,
+    reclaim_window_dead_runs)
 from syndicate_core.full_history import build_full_range_df
 from syndicate_core.refgroup import (
     SET_LABEL as _REFGROUP_LABEL,
@@ -3422,8 +3423,17 @@ elif page == "🧩 Variable Inputs":
                     _bf_n     = min(_sd_n, len(_sd_full))
                     _bf_start = min(_sd_start, max(0, len(_sd_full) - _bf_n))
                     _bf_dis   = list(range(_bf_start, _bf_start + _bf_n))  # window indices
-                    _bf_cols  = render_columns(_bf_dis, _sd_full, _sd_pool)
-                    _bf_pads  = column_pads(_bf_dis, _sd_full)
+                    # Build the fully-aligned skeleton over the WHOLE history (seed =
+                    # true oldest draw), then reclaim — for this display window — the SL
+                    # runs that are dead across every shown column, removed uniformly so
+                    # no surviving number ever shifts row (window-global reclamation).
+                    # Because the oldest shown column now carries inherited holes from
+                    # older-than-window draws, a recent window compacts to just its live
+                    # groups instead of the full-height skeleton.
+                    _bf_all   = list(range(len(_sd_full)))
+                    _bf_cols, _bf_pads = reclaim_window_dead_runs(
+                        render_columns(_bf_all, _sd_full, _sd_pool),
+                        column_pads(_bf_all, _sd_full), _bf_dis)
                     _CELL_H   = 22          # px — fixed so columns align cell-for-cell
                     _WALL     = "#FFFFFF"   # fresh no-contrast hole = solid white wall
                     _CATCH    = "#8B6F47"   # catch hole = one fixed muted brown (round 7)
@@ -3550,17 +3560,18 @@ elif page == "🧩 Variable Inputs":
                     st.caption(
                         f"Blocked flat — SL vs full {len(_sd_full)} draws; showing "
                         f"{_bf_n} draws from D{_sd_full[_bf_dis[0]]['draw']} (left) back "
-                        f"to D{_sd_full[_bf_dis[-1]]['draw']} (newest left). Columns align "
-                        f"recursively: the oldest shown (D{_sd_full[_bf_dis[-1]]['draw']}) "
-                        "seeds the skeleton, so the slider sets the reference frame. "
-                        "Each newer column lifts its "
+                        f"to D{_sd_full[_bf_dis[-1]]['draw']} (newest left). The skeleton "
+                        f"is seeded at the true oldest draw and aligns cell-for-cell; each "
+                        "newer column lifts its "
                         "winners to a top block and leaves their old cells as holes: "
                         "white = wall (no contrasting neighbour), brown = blocked "
                         "(caught by a group neighbour) — both persist across draws. "
                         "Deep = repeat (this draw only). The gray rail marks each group's "
                         "extent (running through inherited holes); “N grp” = distinct "
-                        "since-last groups = what 'max groups' consumes. Recent-window "
-                        "tool — large slider values make very tall columns.")
+                        "since-last groups = what 'max groups' consumes. Groups that are "
+                        "dead across the whole shown window are reclaimed (removed from "
+                        "every column together), so surviving numbers never shift row and "
+                        "a recent window stays compact instead of full-height.")
                     st.caption("  •  ".join(_bf_caption))
                 elif _sd_view == "Cascading (lineage)":
                     # Compute cascading order ONCE over the FULL history (the one-time

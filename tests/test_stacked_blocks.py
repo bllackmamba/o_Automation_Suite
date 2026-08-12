@@ -21,6 +21,7 @@ from syndicate_core.stacked_blocks import (
     decorate_newest,
     deep_repeats,
     group_rail_flags,
+    reclaim_window_dead_runs,
     render_columns,
     since_last_map,
     visible_group_count,
@@ -328,81 +329,88 @@ def test_group_count_identity_matches_distinct_sl(history, idx, ncols):
         assert visible_group_count(col) == distinct_sl
 
 
-# ── drop_dead: dead-group bands are not dragged into strictly-newer columns ──
-# Synthetic 7-number history: 7 sits alone in its SL block at the seed (D30) and
-# then wins at D40, so its singleton block dies. {1,2} instead win at the newest
-# draw (D50) — a *fresh* exit whose band must still show in its own column.
-#   d0 D50 {1,2}  ·  d1 D40 {7,4}  ·  d2 D30 {5,6}  (seed) · older: {3,4},{1,2}
-_DD_HIST = [
-    {"draw": "50", "nums": {1, 2}},
-    {"draw": "40", "nums": {7, 4}},
-    {"draw": "30", "nums": {5, 6}},
-    {"draw": "20", "nums": {3, 4}},
-    {"draw": "10", "nums": {1, 2}},
-]
-_DD_POOL = 7
-_DD_DIS = [0, 1, 2]
+# ── window-global reclamation (reclaim_window_dead_runs) ─────────────────────
+# The redesign: an SL run's shared-grid space is reclaimed only if the run is
+# dead (zero survivors) across the WHOLE displayed window — evaluated once, and
+# removed UNIFORMLY from every column so no surviving number ever shifts row.
+# For the full-range export (oldest column = clean seed) nothing is reclaimed;
+# savings appear in a recent sub-window of the full skeleton.
+
+def _num_rows(cols, pads):
+    """{number: absolute_row} per column, for numbers shown as a num."""
+    return [{c[1]: pads[j] + i for i, c in enumerate(col) if c[0] == "num"}
+            for j, col in enumerate(cols)]
 
 
-def _all_hole_runs(cells):
-    """Spacer-bounded runs that are entirely holes (dead groups)."""
-    runs, cur = [], []
-    for c in cells:
-        if c[0] == "spacer":
-            if cur:
-                runs.append(cur)
-            cur = []
-        else:
-            cur.append(c)
-    if cur:
-        runs.append(cur)
-    return [r for r in runs if all(x[0] == "hole" for x in r)]
+def _row_position_violations(cols, pads, dis, history):
+    """A number that is a num in two adjacent displayed columns and did NOT win
+    at the newer draw must sit at the same absolute row (the regression we fix)."""
+    nr = _num_rows(cols, pads)
+    v = 0
+    for j in range(len(dis) - 1):
+        winners_newer = set(history[dis[j]]["nums"])
+        for x in set(nr[j]) & set(nr[j + 1]):
+            if x not in winners_newer and nr[j][x] != nr[j + 1][x]:
+                v += 1
+    return v
 
 
-def test_drop_dead_drops_dead_band_from_strictly_newer_column():
-    """7's singleton group dies at D40 (idx1). In the strictly-newer D50 column
-    (idx0) that all-hole band is dropped, so drop_dead's D50 is shorter and has
-    one fewer dead run than the keep view — while every surviving number stays."""
-    keep = column_structures(_DD_DIS, _DD_HIST, _DD_POOL, drop_dead=False)
-    drop = column_structures(_DD_DIS, _DD_HIST, _DD_POOL, drop_dead=True)
-
-    # keep drags 7's dead band forward → it ends with a lone all-hole run
-    assert keep[0][-2:] == [("spacer",), ("hole", "wall")]
-    assert len(_all_hole_runs(keep[0])) == 2      # {1,2} fresh + 7 inherited-dead
-
-    # drop removes exactly the strictly-older dead band (7) + its spacer
-    assert len(_all_hole_runs(drop[0])) == 1      # only {1,2}'s fresh-exit band
-    assert len(keep[0]) - len(drop[0]) == 2       # dead run (1 cell) + its spacer
-    # numbers are never touched — dead runs hold none
-    assert sorted(c[1] for c in drop[0] if c[0] == "num") == list(range(1, 8))
+def _is_subsequence(small, big):
+    it = iter(big)
+    return all(cell in it for cell in small)
 
 
-def test_drop_dead_keeps_fresh_exit_band_in_its_own_column():
-    """The column where the last survivor EXITS still shows the fresh holes;
-    only strictly-newer columns omit the now-dead band (docstring guarantee)."""
-    drop = column_structures(_DD_DIS, _DD_HIST, _DD_POOL, drop_dead=True)
-    # D40 (idx1) is where 7 exits — its band is still present there
-    assert ("hole", "wall") in drop[1]
-    assert len(_all_hole_runs(drop[1])) == 1
+def test_reclaim_full_window_is_noop(history, idx):
+    """Displaying the whole history reclaims nothing — its oldest column is the
+    clean all_wt seed (no dead run) — so the aligned view is returned unchanged."""
+    dis = list(range(len(history)))
+    cols = render_columns(dis, history, POOL)
+    pads = column_pads(dis, history)
+    rcols, rpads = reclaim_window_dead_runs(cols, pads, dis)
+    assert rcols == cols
+    assert rpads == pads
 
 
-@pytest.mark.parametrize("ncols", [1, 2, 3, 5, 10])
-def test_drop_dead_preserves_every_number_once(history, idx, ncols):
-    """drop_dead only removes all-hole runs, so every column still holds each
-    number exactly once (real sat history)."""
-    dis = list(range(ncols))
-    cols = render_columns(dis, history, POOL, drop_dead=True)
-    for col in cols:
-        nums = sorted(c[1] for c in col if c[0] == "num")
-        assert nums == list(range(1, POOL + 1))
+def test_reclaim_full_window_has_no_row_position_drift(history, idx):
+    """The full-range export view (every column displayed): zero row-position
+    violations — the alignment regression the window-global rule restores."""
+    dis = list(range(len(history)))
+    cols = render_columns(dis, history, POOL)
+    pads = column_pads(dis, history)
+    rcols, rpads = reclaim_window_dead_runs(cols, pads, dis)
+    assert _row_position_violations(rcols, rpads, dis, history) == 0
 
 
-@pytest.mark.parametrize("ncols", [1, 2, 3, 5, 10])
-def test_drop_dead_preserves_visible_group_count(history, idx, ncols):
-    """N-grp is a num-only count, so dropping all-hole bands cannot change it —
-    keep and drop views agree column-for-column (real sat history)."""
-    dis = list(range(ncols))
-    keep = render_columns(dis, history, POOL, drop_dead=False)
-    drop = render_columns(dis, history, POOL, drop_dead=True)
-    assert ([visible_group_count(c) for c in keep]
-            == [visible_group_count(c) for c in drop])
+def test_reclaim_recent_window_saves_space_without_drift(history, idx):
+    """A recent sub-window of the full skeleton: dead-throughout runs are
+    reclaimed (real space saving) yet no surviving number shifts row (0
+    violations), N-grp is unchanged, and every number still appears once."""
+    full = list(range(len(history)))
+    cols = render_columns(full, history, POOL)
+    pads = column_pads(full, history)
+    dis = list(range(min(10, len(history))))            # newest ≤10 draws
+    rcols, rpads = reclaim_window_dead_runs(cols, pads, dis)
+
+    assert sum(len(c) for c in rcols) < sum(len(cols[j]) for j in dis)   # saved
+    assert _row_position_violations(rcols, rpads, dis, history) == 0
+    assert ([visible_group_count(cols[j]) for j in dis]
+            == [visible_group_count(c) for c in rcols])                  # N-grp
+    for col in rcols:
+        assert sorted(c[1] for c in col if c[0] == "num") == list(range(1, POOL + 1))
+
+
+def test_reclaim_removes_rows_uniformly(history, idx):
+    """Reclamation only ever DROPS rows (never reorders/edits): each displayed
+    column's result is a subsequence of its aligned column — the uniform removal
+    that keeps every column mutually aligned."""
+    full = list(range(len(history)))
+    cols = render_columns(full, history, POOL)
+    pads = column_pads(full, history)
+    dis = list(range(min(10, len(history))))
+    rcols, _ = reclaim_window_dead_runs(cols, pads, dis)
+    for k, j in enumerate(dis):
+        assert _is_subsequence(rcols[k], cols[j])
+
+
+def test_reclaim_empty_window():
+    assert reclaim_window_dead_runs([], [], []) == ([], [])

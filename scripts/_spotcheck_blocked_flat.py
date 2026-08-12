@@ -41,10 +41,9 @@ def main():
     recs, rep = build_full_history(pd.read_csv(b1_path(GAME), dtype=str),
                                    pd.read_csv(game_dirs(GAME)["SinceLast"]/"draw_history.csv", dtype=str), PICK)
     n = len(recs)
-    # drop_dead=True mirrors the export: dead all-hole bands are not dragged into
-    # strictly-newer columns. pads (staircase) are unchanged, so cell placement
-    # stays exrow = HDR + pads[j] + si + 1.
-    cols = render_columns(list(range(n)), recs, POOL, drop_dead=True)
+    # Full export = fully-aligned view (window-global reclamation is a no-op when
+    # the whole range is displayed), so re-derive against the aligned columns.
+    cols = render_columns(list(range(n)), recs, POOL)
     pads = column_pads(list(range(n)), recs)
     rails = [group_rail_flags(c) for c in cols]
 
@@ -56,7 +55,7 @@ def main():
     print(f"slice cols {slice_idx[0]}..{slice_idx[-1]} = {labels[0]}..{labels[-1]} ({len(slice_idx)} draws)")
 
     # (a) seed-anchored equivalence: full-export cols == isolated 10-draw window
-    win = render_columns(slice_idx, recs, POOL, drop_dead=True)
+    win = render_columns(slice_idx, recs, POOL)
     win_rails = [group_rail_flags(c) for c in win]
     eq = all(cols[slice_idx[m]] == win[m] and rails[slice_idx[m]] == win_rails[m]
              for m in range(len(slice_idx)))

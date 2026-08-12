@@ -24,15 +24,15 @@ Faithful-medium notes (Excel can't do a few CSS things 1:1 — flagged, not sile
 
 Layout: newest-left (col A = newest draw), matching the live orientation; the
 oldest draw seeds the recursion at the far right. Three frozen header rows
-(draw id / date / "N grp").
+(draw id / date / "N grp"). Every column bottom-aligns cell-for-cell.
 
-Dead-group drop (``drop_dead=True``, the export default): once a group's block
-loses its last survivor it is DEAD and its all-hole row-band is not dragged into
-strictly-newer columns — the space is simply left blank there. The pad staircase
-and each column's top block are untouched, so this deliberately does NOT preserve
-the live view's cell-for-cell alignment invariant; the sheet's max height is still
-pinned by the oldest seed columns. Pass ``--keep-dead`` to reproduce the old
-fully-aligned view.
+Space reclamation is window-global (``reclaim_window_dead_runs``): an SL run is
+reclaimed only if it is dead across the WHOLE displayed window, removed uniformly
+from every column so no surviving number ever shifts row. The full-range export
+displays every column, and its oldest column is the clean all_wt seed (no dead
+run there), so nothing is reclaimed — the export is the fully-aligned view. Space
+savings only appear in a sub-window (e.g. the live app's slider window), where a
+run can be dead throughout the visible columns.
 
 Usage:
     python3 scripts/export_blocked_flat_xlsx.py [game_key] [out_path]
@@ -53,7 +53,8 @@ sys.path.insert(0, str(ROOT))
 from syndicate_core.full_history import build_full_history            # noqa: E402
 from syndicate_core.pipeline import b1_path, game_dirs, GAMES_CFG     # noqa: E402
 from syndicate_core.stacked_blocks import (                          # noqa: E402
-    render_columns, column_pads, group_rail_flags, visible_group_count)
+    render_columns, column_pads, group_rail_flags, visible_group_count,
+    reclaim_window_dead_runs)
 
 # ── colour constants (copied verbatim from masterapp.py) ────────────────────
 # _num_colour: (bg, fg) by value band. In Blocked-flat only the bg is used and
@@ -131,8 +132,7 @@ def _make_format(wb, s: dict):
     return wb.add_format(props)
 
 
-def build_export(game_key: str, out_path: Path, labeled: bool = False,
-                 drop_dead: bool = True) -> dict:
+def build_export(game_key: str, out_path: Path, labeled: bool = False) -> dict:
     pick = int(GAMES_CFG[game_key].get("pick", 6))
     pool = int(GAMES_CFG[game_key].get("pool", 45))
 
@@ -162,16 +162,14 @@ def build_export(game_key: str, out_path: Path, labeled: bool = False,
     n = len(recs)                                   # 971 for sat
     idx = list(range(n))                            # newest-first → newest-left
     t0 = time.time()
-    # drop_dead=True: once a group's block loses its last survivor (all-hole),
-    # stop dragging that dead row-band into strictly-newer columns — it just
-    # leaves blank space there (the pad staircase / top blocks are untouched, so
-    # this does NOT preserve the cell-for-cell alignment invariant, by design).
-    cols = render_columns(idx, recs, pool, drop_dead=drop_dead)
-    pads = column_pads(idx, recs)                   # staircase unchanged by drop_dead
+    # Fully-aligned columns, then window-global reclamation over the displayed
+    # window (here = every column). For the full range the oldest displayed
+    # column is the clean seed, so nothing is reclaimed and this is a no-op that
+    # returns the aligned view — every column bottom-aligns, no row-position drift.
+    cols, pads = reclaim_window_dead_runs(
+        render_columns(idx, recs, pool), column_pads(idx, recs), idx)
     rails = [group_rail_flags(c) for c in cols]
-    grps = [visible_group_count(c) for c in cols]   # unaffected — dead runs hold no num
-    # Sheet height is still pinned by the oldest seed columns at the bottom of the
-    # pad staircase (not the alignment invariant, which drop_dead breaks).
+    grps = [visible_group_count(c) for c in cols]   # unaffected by reclamation
     height = max(pads[j] + len(cols[j]) for j in range(n))
     print(f"[compute] {n} cols · body height {height} · "
           f"splice {rep['oldest_draw']}→{rep['newest_draw']} · "
@@ -247,7 +245,7 @@ def build_export(game_key: str, out_path: Path, labeled: bool = False,
     return {"n_cols": n, "height": height, "written": written,
             "formats": len(fmt_cache), "report": rep, "out": out_path,
             "recs": recs, "cols": cols, "rails": rails, "pads": pads, "grps": grps,
-            "pool": pool, "labeled": labeled, "drop_dead": drop_dead, "cutoff": cutoff,
+            "pool": pool, "labeled": labeled, "cutoff": cutoff,
             "n_validated": n_val if labeled else None,
             "n_extrapolated": (n - n_val) if labeled else None,
             "hdr_rows": HDR_ROWS}
@@ -256,18 +254,16 @@ def build_export(game_key: str, out_path: Path, labeled: bool = False,
 if __name__ == "__main__":
     argv = sys.argv[1:]
     labeled = "--labeled" in argv
-    drop_dead = "--keep-dead" not in argv        # dead-band drop is the default
     pos = [a for a in argv if not a.startswith("--")]
     game = pos[0] if len(pos) > 0 else "sat"
     default_name = f"blocked_flat_full_range_{game}{'_labeled' if labeled else ''}.xlsx"
     out = Path(pos[1]) if len(pos) > 1 else ROOT / "exports" / default_name
     t = time.time()
-    info = build_export(game, out, labeled=labeled, drop_dead=drop_dead)
+    info = build_export(game, out, labeled=labeled)
     sz = info["out"].stat().st_size / 1e6
     if labeled:
         print(f"[label] cutoff D{info['cutoff']} · validated {info['n_validated']} · "
               f"extrapolated {info['n_extrapolated']}")
     print(f"[done] {info['out']}  ({sz:.1f} MB) · {info['n_cols']} cols × "
           f"{info['height']} rows · {info['written']} filled cells · "
-          f"{info['formats']} formats · labeled={labeled} · "
-          f"drop_dead={info['drop_dead']} · {time.time()-t:.1f}s total")
+          f"{info['formats']} formats · labeled={labeled} · {time.time()-t:.1f}s total")

@@ -207,27 +207,8 @@ def _seed_structure(draw_idx: int, history: Sequence[Mapping], pool: int) -> lis
     return cells
 
 
-def _split_child_runs(child: Sequence) -> list[tuple[list[int], list[tuple]]]:
-    """``(abs_indices, cells)`` for each spacer-bounded run of ``child`` (no
-    empty runs). Used by the ``drop_dead`` path to test a run for survivors."""
-    runs: list[tuple[list[int], list[tuple]]] = []
-    idxs: list[int] = []
-    cells: list[tuple] = []
-    for i, c in enumerate(child):
-        if c[0] == "spacer":
-            if cells:
-                runs.append((idxs, cells))
-            idxs, cells = [], []
-        else:
-            idxs.append(i)
-            cells.append(c)
-    if cells:
-        runs.append((idxs, cells))
-    return runs
-
-
 def column_structures(draw_indices: Sequence[int], history: Sequence[Mapping],
-                      pool: int, *, drop_dead: bool = False) -> list[list[tuple]]:
+                      pool: int) -> list[list[tuple]]:
     """Structural cells for each displayed column.
 
     ``draw_indices`` are the displayed draws newest-first ([d_0 … d_k], indices
@@ -242,15 +223,10 @@ def column_structures(draw_indices: Sequence[int], history: Sequence[Mapping],
     one-column decoration (Addendum 1, Visual round 5). Deep shade is the only
     per-column decoration, applied later in :func:`render_columns`.
 
-    ``drop_dead`` (default False → the cell-for-cell aligned view the live UI
-    and its invariant tests rely on): when True, a run that has already lost
-    EVERY surviving number (all-hole) is DEAD and is dropped instead of being
-    dragged into this newer column. The column where the last survivor exits
-    still shows the fresh holes (that run still holds a num in ``child``); only
-    STRICTLY-newer columns omit it. This intentionally breaks the alignment
-    invariant — see :mod:`scripts.export_blocked_flat_xlsx`. Number cells are
-    never affected (dead runs are all holes), so every number 1..pool still
-    appears exactly once per column.
+    This is the fully-aligned view (every column bottom-aligns cell-for-cell).
+    Space reclamation for a display window — dropping the SL runs that are dead
+    across the whole window — is a separate, alignment-preserving post-pass:
+    :func:`reclaim_window_dead_runs`.
     """
     k = len(draw_indices) - 1
     structs: list[list[tuple]] = [[] for _ in draw_indices]
@@ -259,36 +235,24 @@ def column_structures(draw_indices: Sequence[int], history: Sequence[Mapping],
         winners = set(history[draw_indices[j]]["nums"])
         child = structs[j + 1]
         cells: list[tuple] = [("num", n) for n in sorted(winners)]
-        if not drop_dead:
-            cells.append(("spacer",))
-            for idx, c in enumerate(child):
-                if c[0] == "num":
-                    if c[1] in winners:                   # fresh exit → new hole
-                        fill = _catch_over_cells(child, idx, winners)
-                        cells.append(("hole", "caught" if fill is not None else "wall"))
-                    else:
-                        cells.append(("num", c[1]))
-                elif c[0] == "hole":
-                    cells.append(c)                        # inherited — colour persists
+        cells.append(("spacer",))
+        for idx, c in enumerate(child):
+            if c[0] == "num":
+                if c[1] in winners:                       # fresh exit → new hole
+                    fill = _catch_over_cells(child, idx, winners)
+                    cells.append(("hole", "caught" if fill is not None else "wall"))
                 else:
-                    cells.append(("spacer",))
-        else:
-            for idxs, run in _split_child_runs(child):
-                if not any(c[0] == "num" for c in run):
-                    continue                               # dead run → drop
+                    cells.append(("num", c[1]))
+            elif c[0] == "hole":
+                cells.append(c)                            # inherited — colour persists
+            else:
                 cells.append(("spacer",))
-                for ai, c in zip(idxs, run):
-                    if c[0] == "num" and c[1] in winners:  # fresh exit → new hole
-                        fill = _catch_over_cells(child, ai, winners)
-                        cells.append(("hole", "caught" if fill is not None else "wall"))
-                    else:
-                        cells.append(c)                    # surviving num / inherited hole
         structs[j] = cells
     return structs
 
 
 def render_columns(draw_indices: Sequence[int], history: Sequence[Mapping],
-                   pool: int, *, drop_dead: bool = False) -> list[list[tuple]]:
+                   pool: int) -> list[list[tuple]]:
     """Render-ready cells for each displayed column (newest-first).
 
     Render cell kinds: ``("num", n, deep)``, ``("hole", "wall"|"caught")``,
@@ -298,11 +262,12 @@ def render_columns(draw_indices: Sequence[int], history: Sequence[Mapping],
     ``deep_repeats(d_j) ⊆ W_j`` and a winner's inherited occurrences are holes,
     not numbers.
 
-    ``drop_dead`` is forwarded to :func:`column_structures` (export-only).
+    Fully aligned; for window space reclamation post-process the result with
+    :func:`reclaim_window_dead_runs`.
     """
     if not draw_indices:
         return []
-    structs = column_structures(draw_indices, history, pool, drop_dead=drop_dead)
+    structs = column_structures(draw_indices, history, pool)
     out: list[list[tuple]] = []
     for j, di in enumerate(draw_indices):
         deep = deep_repeats(di, history)
@@ -325,6 +290,92 @@ def column_pads(draw_indices: Sequence[int], history: Sequence[Mapping]) -> list
         prev_w = len(history[draw_indices[j - 1]]["nums"])
         pads[j] = pads[j - 1] + prev_w + 1
     return pads
+
+
+def reclaim_window_dead_runs(cols: Sequence[Sequence], pads: Sequence[int],
+                             display_cols: Sequence[int]
+                             ) -> tuple[list[list], list[int]]:
+    """Window-global space reclamation for the Blocked-flat view.
+
+    Given the fully-aligned columns (:func:`render_columns` or
+    :func:`column_structures` output) plus their :func:`column_pads`, and the
+    indices of the columns actually DISPLAYED (``display_cols`` — a newest-first
+    contiguous run of indices into ``cols``/``pads``), reclaim the shared-grid
+    space of every SL run that is DEAD (zero survivors) across the *whole*
+    displayed window.
+
+    A number, once drawn, stays a hole in every newer column, so a run's
+    survivor count is non-increasing from the oldest displayed column toward the
+    newest. A run is therefore dead across the window **iff** it is dead in the
+    OLDEST displayed column — evaluated once, here, not incrementally per step.
+    Those runs are removed UNIFORMLY (the same absolute rows dropped from every
+    displayed column) together with one bounding spacer each, so:
+
+      * every surviving number keeps its absolute row across adjacent columns
+        (alignment preserved — no per-column compaction, no row-position drift);
+      * a run alive somewhere in the window keeps its full height in every
+        column, even ones where it has already individually died (a stable hole);
+      * :func:`visible_group_count` (N-grp) is untouched — reclaimed runs hold no
+        survivor in any displayed column, so they never counted.
+
+    Returns ``(new_cols, new_pads)`` aligned to ``display_cols`` (same order),
+    top-anchored (the newest displayed column gets pad 0). When the oldest
+    displayed column has no dead run — e.g. the full export, whose oldest column
+    is the clean all_wt seed — nothing is reclaimed and the aligned view is
+    returned unchanged (just re-anchored).
+    """
+    if not display_cols:
+        return [], []
+    span_lo = pads[display_cols[0]]
+    oldest = display_cols[-1]
+    col_old = cols[oldest]
+    base_old = pads[oldest]
+
+    # Dead rows = the all-hole spacer-bounded runs of the oldest displayed column
+    # (each with one bounding spacer), as absolute row indices.
+    dead_rows: set[int] = set()
+    n = len(col_old)
+    i = 0
+    while i < n:
+        if col_old[i][0] == "spacer":
+            i += 1
+            continue
+        j = i
+        while j < n and col_old[j][0] != "spacer":
+            j += 1
+        if all(c[0] == "hole" for c in col_old[i:j]):      # dead run
+            for r in range(i, j):
+                dead_rows.add(base_old + r)
+            if i - 1 >= 0 and col_old[i - 1][0] == "spacer":
+                dead_rows.add(base_old + i - 1)            # drop one bounding spacer
+            elif j < n and col_old[j][0] == "spacer":
+                dead_rows.add(base_old + j)
+        i = j
+
+    span_hi = max(pads[j] + len(cols[j]) for j in display_cols)
+    remap: dict[int, int] = {}
+    nxt = 0
+    for r in range(span_lo, span_hi):
+        if r not in dead_rows:
+            remap[r] = nxt
+            nxt += 1
+
+    new_cols: list[list] = []
+    new_pads: list[int] = []
+    for j in display_cols:
+        base = pads[j]
+        out: list = []
+        first = None
+        for i, c in enumerate(cols[j]):
+            r = base + i
+            if r in dead_rows:
+                continue
+            if first is None:
+                first = remap[r]
+            out.append(c)
+        new_cols.append(out)
+        new_pads.append(first if first is not None else 0)
+    return new_cols, new_pads
 
 
 # ── group clarity: rail + visible group count (Addendum 1, Visual round 3) ───
