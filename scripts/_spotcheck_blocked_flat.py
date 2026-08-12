@@ -35,7 +35,7 @@ def ui_truth(cell, railed):
         if not cell[2]:                    # inherited hole → no fill (transparent)
             # keep only the group rail if this cell carries it (bg None == no fill)
             return {"bg": None, "fg": None, "text": None, "railed": True} if railed else None
-        return {"bg": "#FFFFFF" if cell[1] == "wall" else "#8B6F47",
+        return {"bg": "#FF0000" if cell[1] == "wall" else "#8B6F47",
                 "fg": None, "text": None, "railed": railed}
     return None
 

@@ -16,9 +16,9 @@ Colour logic is copied VERBATIM from the UI so the two never drift:
 Faithful-medium notes (Excel can't do a few CSS things 1:1 — flagged, not silent):
   * num-cell border is CSS ``rgba(0,0,0,.15)`` (15%-alpha black). Excel borders are
     opaque, so we approximate with a hairline light-grey (#D9D9D9).
-  * a WALL hole is #FFFFFF; on Excel's white sheet that is invisible, so wall cells
-    get a hairline outline (only) so the box still reads. Spacer/pad cells stay
-    truly empty (transparent, as in the UI).
+  * a WALL hole is #FF0000 (pure red). The hairline outline (originally added so a
+    white wall would read on Excel's white sheet) is now redundant but retained
+    unchanged. Spacer/pad cells stay truly empty (transparent, as in the UI).
   * in Blocked-flat the UI deliberately has NO red R-combo outline (masterapp
     L3470-3471: "the full pool is always in R") — so none is drawn here either.
 
@@ -61,7 +61,7 @@ from syndicate_core.stacked_blocks import (                          # noqa: E40
 # the fg is overridden (black on light, white on deep), so we keep bg only here.
 _LIGHT_BANDS = ((9, "#FFFF00"), (19, "#00B0F0"), (29, "#A0A0A0"), (39, "#92D050"))
 _PINK = "#FF69B4"                       # 40+
-_WALL = "#FFFFFF"                       # fresh no-contrast hole = solid white wall
+_WALL = "#FF0000"                       # fresh no-contrast hole = solid red wall
 _CATCH = "#8B6F47"                      # catch hole = one fixed muted brown (round 7)
 _RAIL = "#777777"                       # group rail (masterapp _bf_row "#777")
 _FAINT = "#D9D9D9"                      # ~= CSS rgba(0,0,0,.15) num-cell border

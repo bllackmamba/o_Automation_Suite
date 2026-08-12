@@ -3435,7 +3435,7 @@ elif page == "🧩 Variable Inputs":
                         render_columns(_bf_all, _sd_full, _sd_pool),
                         column_pads(_bf_all, _sd_full), _bf_dis)
                     _CELL_H   = 22          # px — fixed so columns align cell-for-cell
-                    _WALL     = "#FFFFFF"   # fresh no-contrast hole = solid white wall
+                    _WALL     = "#FF0000"   # fresh no-contrast hole = solid red wall
                     _CATCH    = "#8B6F47"   # catch hole = one fixed muted brown (round 7)
 
                     def _bf_deep(_hex: str) -> str:
