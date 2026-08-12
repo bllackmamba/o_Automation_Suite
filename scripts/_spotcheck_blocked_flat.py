@@ -32,6 +32,9 @@ def ui_truth(cell, railed):
             fg = "#000000"
         return {"bg": bg, "fg": fg, "text": n, "railed": railed}
     if k == "hole":
+        if not cell[2]:                    # inherited hole → no fill (transparent)
+            # keep only the group rail if this cell carries it (bg None == no fill)
+            return {"bg": None, "fg": None, "text": None, "railed": True} if railed else None
         return {"bg": "#FFFFFF" if cell[1] == "wall" else "#8B6F47",
                 "fg": None, "text": None, "railed": railed}
     return None
@@ -72,7 +75,10 @@ def main():
                 if s is not None:
                     mism_b += 1
                 continue
-            if not (s and s["bg"].upper() == t["bg"].upper() and s["font"] == t["fg"]
+            _bg_ok = (s["bg"] is None and t["bg"] is None) or (
+                s["bg"] is not None and t["bg"] is not None
+                and s["bg"].upper() == t["bg"].upper())
+            if not (s and _bg_ok and s["font"] == t["fg"]
                     and s["text"] == t["text"] and s["railed"] == t["railed"]):
                 mism_b += 1
     print(f"(b) cell_style vs UI-truth mismatches: {mism_b}")
@@ -88,8 +94,8 @@ def main():
             if t is None:
                 continue                      # spacer -> empty cell, nothing to check
             exrow = HDR + pads[j] + si + 1    # 1-indexed body row
-            expected[(exrow, excol)] = ("FF" + t["bg"].lstrip("#").upper(),
-                                        t["text"], t["railed"])
+            argb = ("FF" + t["bg"].lstrip("#").upper()) if t["bg"] is not None else None
+            expected[(exrow, excol)] = (argb, t["text"], t["railed"])
     print(f"(c) physical cells to verify: {len(expected)}")
 
     # (c) read those cells back from the xlsx and compare fill/value/rail

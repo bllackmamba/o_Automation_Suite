@@ -88,9 +88,11 @@ def _deep_bg(hexc: str) -> str:
 
 def cell_style(cell: tuple, railed: bool) -> dict | None:
     """Map one render cell + rail flag to its visual style, mirroring
-    masterapp._bf_cell_html + _bf_row exactly. Returns None for spacer/pad
-    (drawn as an empty transparent cell), else a dict:
+    masterapp._bf_cell_html + _bf_row exactly. Returns None for a spacer/pad or an
+    unrailed inherited hole (drawn as an empty transparent cell), else a dict:
         {"bg","font","text","faint","wall_edge","railed"}.
+    A hole is painted (wall/caught) only in its origin column (cell[2] True); an
+    inherited hole gets no fill — ``bg`` None — keeping only the rail if present.
     """
     kind = cell[0]
     if kind == "num":
@@ -102,9 +104,15 @@ def cell_style(cell: tuple, railed: bool) -> dict | None:
         return {"bg": bg, "font": "#000000", "text": n,      # light → black digits
                 "faint": True, "wall_edge": False, "railed": railed}
     if kind == "hole":
-        is_wall = cell[1] == "wall"
-        return {"bg": _WALL if is_wall else _CATCH, "font": None, "text": None,
-                "faint": False, "wall_edge": is_wall, "railed": railed}
+        if cell[2]:                      # origin column → paint wall/caught
+            is_wall = cell[1] == "wall"
+            return {"bg": _WALL if is_wall else _CATCH, "font": None, "text": None,
+                    "faint": False, "wall_edge": is_wall, "railed": railed}
+        # inherited hole → no fill (transparent); keep the group rail if present
+        if railed:
+            return {"bg": None, "font": None, "text": None,
+                    "faint": False, "wall_edge": False, "railed": True}
+        return None
     return None                          # spacer / pad → transparent
 
 
@@ -115,8 +123,9 @@ def _fmt_key(s: dict) -> tuple:
 
 def _make_format(wb, s: dict):
     props = {"align": "center", "valign": "vcenter",
-             "font_name": "Menlo", "font_size": 8,
-             "bg_color": s["bg"]}
+             "font_name": "Menlo", "font_size": 8}
+    if s["bg"] is not None:              # None → no fill (transparent inherited hole)
+        props["bg_color"] = s["bg"]
     if s["font"]:
         props["font_color"] = s["font"]
     if s["text"] is not None:

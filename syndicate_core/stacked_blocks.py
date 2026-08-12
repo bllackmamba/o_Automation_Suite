@@ -255,12 +255,18 @@ def render_columns(draw_indices: Sequence[int], history: Sequence[Mapping],
                    pool: int) -> list[list[tuple]]:
     """Render-ready cells for each displayed column (newest-first).
 
-    Render cell kinds: ``("num", n, deep)``, ``("hole", "wall"|"caught")``,
-    ``("spacer",)``. Hole kinds come straight from :func:`column_structures`
-    (they persist across columns); the only thing added here is per-column deep
-    shading, which lands only on the column's own top block (spec §5) because
-    ``deep_repeats(d_j) ⊆ W_j`` and a winner's inherited occurrences are holes,
-    not numbers.
+    Render cell kinds: ``("num", n, deep)``, ``("hole", "wall"|"caught", origin)``,
+    ``("spacer",)``. Two per-column render flags are added here; the underlying
+    structure is untouched:
+
+    * ``deep`` — this draw's repeat shading, landing only on the column's own top
+      block (spec §5) because ``deep_repeats(d_j) ⊆ W_j``.
+    * ``origin`` — the column where a hole's exit ACTUALLY happened (a fresh exit:
+      the aligned child cell ``structs[j+1][p-offset]`` is still a num). The
+      wall/caught ``kind`` is the permanent record from :func:`column_structures`
+      and persists across columns, but it is only PAINTED in the origin column;
+      every newer column inherits the same slot as a hole and renders it with no
+      fill. This mirrors ``deep`` (marked only in the winner's own column).
 
     Fully aligned; for window space reclamation post-process the result with
     :func:`reclaim_window_dead_runs`.
@@ -271,12 +277,19 @@ def render_columns(draw_indices: Sequence[int], history: Sequence[Mapping],
     out: list[list[tuple]] = []
     for j, di in enumerate(draw_indices):
         deep = deep_repeats(di, history)
+        child = structs[j + 1] if j + 1 < len(structs) else None
+        offset = len(history[di]["nums"]) + 1              # top block + spacer
         col: list[tuple] = []
-        for c in structs[j]:
+        for p, c in enumerate(structs[j]):
             if c[0] == "num":
                 col.append(("num", c[1], c[1] in deep))
+            elif c[0] == "hole":
+                origin = (child is not None and p >= offset
+                          and (p - offset) < len(child)
+                          and child[p - offset][0] == "num")
+                col.append(("hole", c[1], origin))         # kind + paint-here flag
             else:
-                col.append(c)                              # hole (with kind) or spacer
+                col.append(c)                              # spacer
         out.append(col)
     return out
 

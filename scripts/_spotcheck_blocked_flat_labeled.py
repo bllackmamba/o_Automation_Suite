@@ -32,6 +32,8 @@ def ui_truth(cell, railed):
             fg = "#000000"
         return {"bg": bg, "fg": fg, "text": n, "railed": railed}
     if k == "hole":
+        if not cell[2]:                    # inherited hole → no fill (transparent)
+            return {"bg": None, "fg": None, "text": None, "railed": True} if railed else None
         return {"bg": "#FFFFFF" if cell[1] == "wall" else "#8B6F47",
                 "fg": None, "text": None, "railed": railed}
     return None
@@ -74,7 +76,10 @@ def main():
             t, s = ui_truth(cell, rails[j][si]), cell_style(cell, rails[j][si])
             if t is None:
                 mm_b += s is not None; continue
-            if not (s and s["bg"].upper() == t["bg"].upper() and s["font"] == t["fg"]
+            _bg_ok = (s["bg"] is None and t["bg"] is None) or (
+                s["bg"] is not None and t["bg"] is not None
+                and s["bg"].upper() == t["bg"].upper())
+            if not (s and _bg_ok and s["font"] == t["fg"]
                     and s["text"] == t["text"] and s["railed"] == t["railed"]):
                 mm_b += 1
     print(f"(b) cell_style vs UI-truth mismatches: {mm_b}")
@@ -87,7 +92,8 @@ def main():
             if t is None:
                 continue
             exrow = HDR + pads[j] + si + 1
-            expected[(exrow, j + 1)] = ("FF" + t["bg"].lstrip("#").upper(), t["text"], t["railed"])
+            argb = ("FF" + t["bg"].lstrip("#").upper()) if t["bg"] is not None else None
+            expected[(exrow, j + 1)] = (argb, t["text"], t["railed"])
     wb = openpyxl.load_workbook(XLSX, read_only=True); ws = wb.active
     min_c, max_c = sl[0] + 1, sl[-1] + 1
     checked = fill_mm = val_mm = rail_mm = 0; seen = set(); exrow = HDR

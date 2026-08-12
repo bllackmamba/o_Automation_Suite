@@ -3483,9 +3483,14 @@ elif page == "🧩 Variable Inputs":
                             return _bf_box(f"<span style='color:{_fg}'>{_n}</span>",
                                            bg=_bg, border=_bd)
                         if _kind == "hole":
-                            # wall/caught colour is fixed at creation and persists
-                            # into every newer column (Visual round 5).
-                            return _bf_box(bg=_WALL if _c[1] == "wall" else _CATCH)
+                            # wall/caught kind is fixed at creation, but the colour
+                            # is PAINTED only in the origin column (_c[2] True) —
+                            # the column where the exit happened. Every newer column
+                            # inherits the same slot as a hole with no fill (the
+                            # group rail is drawn by the _bf_row wrapper regardless).
+                            if _c[2]:
+                                return _bf_box(bg=_WALL if _c[1] == "wall" else _CATCH)
+                            return _bf_box()                # inherited hole → transparent
                         # spacer / pad → plain background
                         return _bf_box()
 

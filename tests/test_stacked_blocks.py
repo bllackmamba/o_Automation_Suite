@@ -414,3 +414,46 @@ def test_reclaim_removes_rows_uniformly(history, idx):
 
 def test_reclaim_empty_window():
     assert reclaim_window_dead_runs([], [], []) == ([], [])
+
+
+# ── wall/caught origin flag: a hole is painted only in its exit column ────────
+# render_columns tags each hole ("hole", kind, origin); origin is True only in
+# the column where the exit actually happened (the aligned child cell is still a
+# num). Every newer column inherits the same slot as a hole with origin False and
+# renders it transparent — mirroring `deep`.
+
+def test_render_hole_origin_flag_matches_fresh_exit(history, idx):
+    """A render hole's origin flag is True exactly where its aligned child cell
+    is still a num (the fresh exit), and False where the child is already a hole
+    (inherited). kind (wall/caught) is retained regardless."""
+    dis = list(range(12))
+    structs = column_structures(dis, history, POOL)
+    cols = render_columns(dis, history, POOL)
+    for j in range(len(dis)):
+        offset = len(history[dis[j]]["nums"]) + 1
+        child = structs[j + 1] if j + 1 < len(structs) else None
+        for p, c in enumerate(cols[j]):
+            if c[0] != "hole":
+                continue
+            assert len(c) == 3 and c[1] in ("wall", "caught")
+            expected = (child is not None and p >= offset
+                        and (p - offset) < len(child) and child[p - offset][0] == "num")
+            assert c[2] is expected
+
+
+def test_render_hole_painted_in_exactly_one_column(history, idx):
+    """Following one vacated slot across columns (same absolute row in the aligned
+    grid), at most one column paints it (origin=True); newer columns inherit it
+    transparently. This is the whole point of the fix — no colour persistence."""
+    from collections import defaultdict
+    n = min(30, len(history))
+    dis = list(range(n))
+    cols = render_columns(dis, history, POOL)
+    pads = column_pads(dis, history)
+    origins_by_row: dict[int, int] = defaultdict(int)
+    for j in range(n):
+        for p, c in enumerate(cols[j]):
+            if c[0] == "hole" and c[2]:
+                origins_by_row[pads[j] + p] += 1
+    assert origins_by_row, "expected some coloured holes in the window"
+    assert max(origins_by_row.values()) == 1     # each vacated slot painted once
