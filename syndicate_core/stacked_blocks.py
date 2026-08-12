@@ -207,8 +207,27 @@ def _seed_structure(draw_idx: int, history: Sequence[Mapping], pool: int) -> lis
     return cells
 
 
+def _split_child_runs(child: Sequence) -> list[tuple[list[int], list[tuple]]]:
+    """``(abs_indices, cells)`` for each spacer-bounded run of ``child`` (no
+    empty runs). Used by the ``drop_dead`` path to test a run for survivors."""
+    runs: list[tuple[list[int], list[tuple]]] = []
+    idxs: list[int] = []
+    cells: list[tuple] = []
+    for i, c in enumerate(child):
+        if c[0] == "spacer":
+            if cells:
+                runs.append((idxs, cells))
+            idxs, cells = [], []
+        else:
+            idxs.append(i)
+            cells.append(c)
+    if cells:
+        runs.append((idxs, cells))
+    return runs
+
+
 def column_structures(draw_indices: Sequence[int], history: Sequence[Mapping],
-                      pool: int) -> list[list[tuple]]:
+                      pool: int, *, drop_dead: bool = False) -> list[list[tuple]]:
     """Structural cells for each displayed column.
 
     ``draw_indices`` are the displayed draws newest-first ([d_0 … d_k], indices
@@ -222,6 +241,16 @@ def column_structures(draw_indices: Sequence[int], history: Sequence[Mapping],
     that same kind unchanged — hole colour is a permanent record, not a
     one-column decoration (Addendum 1, Visual round 5). Deep shade is the only
     per-column decoration, applied later in :func:`render_columns`.
+
+    ``drop_dead`` (default False → the cell-for-cell aligned view the live UI
+    and its invariant tests rely on): when True, a run that has already lost
+    EVERY surviving number (all-hole) is DEAD and is dropped instead of being
+    dragged into this newer column. The column where the last survivor exits
+    still shows the fresh holes (that run still holds a num in ``child``); only
+    STRICTLY-newer columns omit it. This intentionally breaks the alignment
+    invariant — see :mod:`scripts.export_blocked_flat_xlsx`. Number cells are
+    never affected (dead runs are all holes), so every number 1..pool still
+    appears exactly once per column.
     """
     k = len(draw_indices) - 1
     structs: list[list[tuple]] = [[] for _ in draw_indices]
@@ -230,24 +259,36 @@ def column_structures(draw_indices: Sequence[int], history: Sequence[Mapping],
         winners = set(history[draw_indices[j]]["nums"])
         child = structs[j + 1]
         cells: list[tuple] = [("num", n) for n in sorted(winners)]
-        cells.append(("spacer",))
-        for idx, c in enumerate(child):
-            if c[0] == "num":
-                if c[1] in winners:                       # fresh exit → new hole
-                    fill = _catch_over_cells(child, idx, winners)
-                    cells.append(("hole", "caught" if fill is not None else "wall"))
+        if not drop_dead:
+            cells.append(("spacer",))
+            for idx, c in enumerate(child):
+                if c[0] == "num":
+                    if c[1] in winners:                   # fresh exit → new hole
+                        fill = _catch_over_cells(child, idx, winners)
+                        cells.append(("hole", "caught" if fill is not None else "wall"))
+                    else:
+                        cells.append(("num", c[1]))
+                elif c[0] == "hole":
+                    cells.append(c)                        # inherited — colour persists
                 else:
-                    cells.append(("num", c[1]))
-            elif c[0] == "hole":
-                cells.append(c)                            # inherited — colour persists
-            else:
+                    cells.append(("spacer",))
+        else:
+            for idxs, run in _split_child_runs(child):
+                if not any(c[0] == "num" for c in run):
+                    continue                               # dead run → drop
                 cells.append(("spacer",))
+                for ai, c in zip(idxs, run):
+                    if c[0] == "num" and c[1] in winners:  # fresh exit → new hole
+                        fill = _catch_over_cells(child, ai, winners)
+                        cells.append(("hole", "caught" if fill is not None else "wall"))
+                    else:
+                        cells.append(c)                    # surviving num / inherited hole
         structs[j] = cells
     return structs
 
 
 def render_columns(draw_indices: Sequence[int], history: Sequence[Mapping],
-                   pool: int) -> list[list[tuple]]:
+                   pool: int, *, drop_dead: bool = False) -> list[list[tuple]]:
     """Render-ready cells for each displayed column (newest-first).
 
     Render cell kinds: ``("num", n, deep)``, ``("hole", "wall"|"caught")``,
@@ -256,10 +297,12 @@ def render_columns(draw_indices: Sequence[int], history: Sequence[Mapping],
     shading, which lands only on the column's own top block (spec §5) because
     ``deep_repeats(d_j) ⊆ W_j`` and a winner's inherited occurrences are holes,
     not numbers.
+
+    ``drop_dead`` is forwarded to :func:`column_structures` (export-only).
     """
     if not draw_indices:
         return []
-    structs = column_structures(draw_indices, history, pool)
+    structs = column_structures(draw_indices, history, pool, drop_dead=drop_dead)
     out: list[list[tuple]] = []
     for j, di in enumerate(draw_indices):
         deep = deep_repeats(di, history)

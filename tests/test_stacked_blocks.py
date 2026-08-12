@@ -326,3 +326,83 @@ def test_group_count_identity_matches_distinct_sl(history, idx, ncols):
     for j, col in enumerate(cols):
         distinct_sl = len(set(since_last_map(dis[j], history, POOL).values()))
         assert visible_group_count(col) == distinct_sl
+
+
+# ── drop_dead: dead-group bands are not dragged into strictly-newer columns ──
+# Synthetic 7-number history: 7 sits alone in its SL block at the seed (D30) and
+# then wins at D40, so its singleton block dies. {1,2} instead win at the newest
+# draw (D50) — a *fresh* exit whose band must still show in its own column.
+#   d0 D50 {1,2}  ·  d1 D40 {7,4}  ·  d2 D30 {5,6}  (seed) · older: {3,4},{1,2}
+_DD_HIST = [
+    {"draw": "50", "nums": {1, 2}},
+    {"draw": "40", "nums": {7, 4}},
+    {"draw": "30", "nums": {5, 6}},
+    {"draw": "20", "nums": {3, 4}},
+    {"draw": "10", "nums": {1, 2}},
+]
+_DD_POOL = 7
+_DD_DIS = [0, 1, 2]
+
+
+def _all_hole_runs(cells):
+    """Spacer-bounded runs that are entirely holes (dead groups)."""
+    runs, cur = [], []
+    for c in cells:
+        if c[0] == "spacer":
+            if cur:
+                runs.append(cur)
+            cur = []
+        else:
+            cur.append(c)
+    if cur:
+        runs.append(cur)
+    return [r for r in runs if all(x[0] == "hole" for x in r)]
+
+
+def test_drop_dead_drops_dead_band_from_strictly_newer_column():
+    """7's singleton group dies at D40 (idx1). In the strictly-newer D50 column
+    (idx0) that all-hole band is dropped, so drop_dead's D50 is shorter and has
+    one fewer dead run than the keep view — while every surviving number stays."""
+    keep = column_structures(_DD_DIS, _DD_HIST, _DD_POOL, drop_dead=False)
+    drop = column_structures(_DD_DIS, _DD_HIST, _DD_POOL, drop_dead=True)
+
+    # keep drags 7's dead band forward → it ends with a lone all-hole run
+    assert keep[0][-2:] == [("spacer",), ("hole", "wall")]
+    assert len(_all_hole_runs(keep[0])) == 2      # {1,2} fresh + 7 inherited-dead
+
+    # drop removes exactly the strictly-older dead band (7) + its spacer
+    assert len(_all_hole_runs(drop[0])) == 1      # only {1,2}'s fresh-exit band
+    assert len(keep[0]) - len(drop[0]) == 2       # dead run (1 cell) + its spacer
+    # numbers are never touched — dead runs hold none
+    assert sorted(c[1] for c in drop[0] if c[0] == "num") == list(range(1, 8))
+
+
+def test_drop_dead_keeps_fresh_exit_band_in_its_own_column():
+    """The column where the last survivor EXITS still shows the fresh holes;
+    only strictly-newer columns omit the now-dead band (docstring guarantee)."""
+    drop = column_structures(_DD_DIS, _DD_HIST, _DD_POOL, drop_dead=True)
+    # D40 (idx1) is where 7 exits — its band is still present there
+    assert ("hole", "wall") in drop[1]
+    assert len(_all_hole_runs(drop[1])) == 1
+
+
+@pytest.mark.parametrize("ncols", [1, 2, 3, 5, 10])
+def test_drop_dead_preserves_every_number_once(history, idx, ncols):
+    """drop_dead only removes all-hole runs, so every column still holds each
+    number exactly once (real sat history)."""
+    dis = list(range(ncols))
+    cols = render_columns(dis, history, POOL, drop_dead=True)
+    for col in cols:
+        nums = sorted(c[1] for c in col if c[0] == "num")
+        assert nums == list(range(1, POOL + 1))
+
+
+@pytest.mark.parametrize("ncols", [1, 2, 3, 5, 10])
+def test_drop_dead_preserves_visible_group_count(history, idx, ncols):
+    """N-grp is a num-only count, so dropping all-hole bands cannot change it —
+    keep and drop views agree column-for-column (real sat history)."""
+    dis = list(range(ncols))
+    keep = render_columns(dis, history, POOL, drop_dead=False)
+    drop = render_columns(dis, history, POOL, drop_dead=True)
+    assert ([visible_group_count(c) for c in keep]
+            == [visible_group_count(c) for c in drop])
