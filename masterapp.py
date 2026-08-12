@@ -233,11 +233,27 @@ from syndicate_core.pipeline import *
 from syndicate_core.matching import *
 from syndicate_core.generators import *
 from syndicate_core.collation import *
+from syndicate_core.main_split import load_or_build_split
+from syndicate_core.escalation import EscalationContext
 from syndicate_core.b_sync import *
 from syndicate_core.scanners import (
     parse_cvi_filename, cvi_date_from_mtime, resolve_main_data_choices)
 from syndicate_core.stacked_blocks import (
-    render_columns, column_pads, visible_group_count, group_rail_flags)
+    render_columns, column_pads, visible_group_count, group_rail_flags,
+    reclaim_window_dead_runs)
+from syndicate_core.full_history import build_full_range_df
+from syndicate_core.refgroup import (
+    SET_LABEL as _REFGROUP_LABEL,
+    build_ref_group_piece,
+    classify_shared,
+    empirical_stream_counts,
+    hypergeometric_breakdown,
+    load_newest_reference,
+    locked_sc_dict,
+    selected_bands_for_pick,
+    selected_unselected,
+    total_space,
+)
 
 SCRAPE_URL = "https://www.thelott.com/syndicates?postcode={pc}"
 SCRAPE_URL_WA = "https://www.lotterywest.wa.gov.au/play-online/syndicate-games?postcode={pc}"
@@ -847,7 +863,8 @@ def _cvi_display(df: pd.DataFrame) -> pd.DataFrame:
     return disp
 
 
-def execute_collation(components: list[str]) -> pd.DataFrame:
+def execute_collation(components: list[str],
+                      *, ref_group: list[int] | None = None) -> pd.DataFrame:
     """
     Build a formula's CVI by STACKING each variable's w-sets as ROWS (vertically)
     and numbering the position columns w1, w2, … across the widest combination.
@@ -885,6 +902,14 @@ def execute_collation(components: list[str]) -> pd.DataFrame:
         block = block.rename(columns={c: f"w{i+1}" for i, c in enumerate(val_cols)})
         block.insert(0, "Source", var)
         pieces.append(block)
+
+    # RefGroup_w1 joins the SAME stack as a 7th block (1 row), appended LAST so
+    # the sequential Row_ID assignment below hands it the next ID after every
+    # variable block — never a hand-picked ID (see syndicate_core/refgroup.py).
+    # Opt-in: default (ref_group=None) leaves every existing CVI export byte-
+    # identical; only the RefGroup feature passes the newest draw's numbers.
+    if ref_group:
+        pieces.append(build_ref_group_piece(ref_group))
 
     if not pieces:
         return pd.DataFrame()
@@ -3165,15 +3190,75 @@ elif page == "🧩 Variable Inputs":
                 '</div>',
                 unsafe_allow_html=True)
 
-            _sd_hist_path = (
-                _gdirs.get("SinceLast", _gdirs.get("Base", Path(".")))
-                / "draw_history.csv"
-            )
-            _sd_hist = (
-                pd.read_csv(_sd_hist_path, dtype=str)
-                if _sd_hist_path.exists()
-                else pd.DataFrame()
-            )
+            # ── History source ────────────────────────────────────────────
+            # "Lottolyzer (recent)" = draw_history.csv as fetched (~150 draws).
+            # "Full range (B1 splice)" = B1 win history (deep, → ~2761) spliced
+            # with draw_history for the top draw + explicit numbering, validated
+            # on the overlap (see syndicate_core.full_history). SL/blocks are
+            # source-agnostic (computed from the draw list itself), so the full
+            # range is a clean drop-in — the same reader shape either way.
+            _sd_dir       = _gdirs.get("SinceLast", _gdirs.get("Base", Path(".")))
+            _sd_hist_path = _sd_dir / "draw_history.csv"
+            # Default = Lottolyzer (recent): it IS exactly the externally
+            # validated window (draws ~4403→4701, the 149-draw B1 overlap + the
+            # confirmed top draw 4701) with zero extrapolation. The B1 splice
+            # extends deeper (→2761) but its draw-number LABELS below the overlap
+            # are extrapolated and not yet externally verified, so it stays as
+            # built-but-parked infrastructure — opt-in only until label
+            # verification is done (deferred follow-up; see full_history.py).
+            _sd_src = st.radio(
+                "History source:",
+                ["Lottolyzer (recent)", "Full range (B1 splice)"],
+                index=0,
+                horizontal=True,
+                key="sd_hist_source",
+                help="Lottolyzer (recent) = the externally validated window "
+                     "(~4403→4701), the safe default for pattern work. Full range "
+                     "splices B1's deep history (→2761) with draw_history; the "
+                     "overlap is sanity-checked and the join is only offered when "
+                     "the shared draws agree, but its deep draw-number labels are "
+                     "extrapolated and pending external verification — use with care.")
+
+            _sd_hist = pd.DataFrame()
+            _sd_splice_rep = None
+            if _sd_src == "Full range (B1 splice)":
+                _b1p = b1_path(_gkey)
+                if _b1p is None or not _b1p.exists():
+                    st.markdown(
+                        '<div class="warn">⚠️ No B1 win history for this game — '
+                        'full range needs B1. Falling back to the lottolyzer file.</div>',
+                        unsafe_allow_html=True)
+                elif not _sd_hist_path.exists():
+                    st.markdown(
+                        '<div class="warn">⚠️ No draw_history.csv to anchor the splice. '
+                        'Fetch it (Stats tab) first.</div>', unsafe_allow_html=True)
+                else:
+                    try:
+                        _sd_hist, _sd_splice_rep = build_full_range_df(
+                            pd.read_csv(_b1p, dtype=str),
+                            pd.read_csv(_sd_hist_path, dtype=str),
+                            int(_gcfg.get("pick", 6)))
+                        if not _sd_splice_rep["overlap_agree"]:
+                            _mm = _sd_splice_rep["overlap_mismatches"]
+                            st.markdown(
+                                f'<div class="warn">⚠️ Splice NOT trusted: '
+                                f'{len(_mm)} overlapping draw(s) disagree between B1 and '
+                                f'draw_history (e.g. draw {_mm[0]["dh_draw"]}). '
+                                f'Using lottolyzer only.</div>', unsafe_allow_html=True)
+                            _sd_hist = pd.DataFrame()
+                    except Exception as _sd_ex:
+                        st.markdown(
+                            f'<div class="warn">⚠️ Could not build full range: {_sd_ex}. '
+                            f'Using lottolyzer only.</div>', unsafe_allow_html=True)
+                        _sd_hist = pd.DataFrame()
+
+            if _sd_hist.empty:   # fallback / default = the fetched lottolyzer file
+                _sd_hist = (
+                    pd.read_csv(_sd_hist_path, dtype=str)
+                    if _sd_hist_path.exists()
+                    else pd.DataFrame()
+                )
+
             if _sd_hist.empty:
                 st.markdown(
                     '<div class="warn">⚠️ No draw history loaded. '
@@ -3183,10 +3268,30 @@ elif page == "🧩 Variable Inputs":
                 _sd_pool      = _gcfg.get("pool", 45)
                 _sd_available = len(_sd_hist)
 
+                if _sd_splice_rep is not None and not _sd_hist.empty:
+                    st.caption(
+                        f"✅ Full range: {_sd_splice_rep['oldest_draw']}→"
+                        f"{_sd_splice_rep['newest_draw']} "
+                        f"({_sd_splice_rep['n_full']} draws) · overlap "
+                        f"{_sd_splice_rep['overlap_n']} draws all agree · "
+                        f"B1 {_sd_splice_rep['n_b1']} + top D"
+                        f"{','.join(_sd_splice_rep['top_from_dh'])} from lottolyzer")
+
                 _sd_n = st.slider(
                     "Number of draws to display:",
                     1, min(_sd_available, 10), min(4, _sd_available),
                     key="sd_n_draws")
+
+                # Window start — how many draws back from the newest the display
+                # window begins. 0 = newest (legacy behaviour); lets the fixed-
+                # width window slide across the full range instead of only the
+                # newest 10. SL is still computed against the FULL history.
+                _sd_start = 0
+                if _sd_available > _sd_n:
+                    _sd_start = st.slider(
+                        "Window start (draws back from newest):",
+                        0, _sd_available - _sd_n, 0,
+                        key="sd_win_start")
 
                 _sd_view = st.radio(
                     "View mode:",
@@ -3215,19 +3320,11 @@ elif page == "🧩 Variable Inputs":
                             result.append(int(tok))
                     return result
 
-                # Build rows list (newest-first) with enough look-back for SL computation
-                _sd_lookback = _sd_n + _sd_pool
-                _sd_rows: list = []
-                for _, _sdr in _sd_hist.head(_sd_lookback).iterrows():
-                    _sd_rows.append({
-                        "draw": str(_sdr.get("draw", "")),
-                        "date": str(_sdr.get("date", ""))[:10],
-                        "nums": set(_sd_parse_nums(_sdr.get("numbers", ""))),
-                    })
-
-                # FULL history (newest-first) — cascading seeds from the true
-                # oldest draw and walks forward through every draw, so it needs
-                # the entire file, not the display-window slice above.
+                # FULL history (newest-first) — all three views compute SL/lineage
+                # against the entire history (never a window slice); the display
+                # window (_sd_start.._sd_start+_sd_n) only selects which columns show.
+                # Cascading also seeds from the true oldest draw, so it needs the
+                # whole list regardless.
                 _sd_full: list = []
                 for _, _sdr in _sd_hist.iterrows():
                     _sd_full.append({
@@ -3324,9 +3421,19 @@ elif page == "🧩 Variable Inputs":
                     # and alignment logic lives in syndicate_core.stacked_blocks; this
                     # branch is render-only.
                     _bf_n     = min(_sd_n, len(_sd_full))
-                    _bf_dis   = list(range(_bf_n))                 # newest-first indices
-                    _bf_cols  = render_columns(_bf_dis, _sd_full, _sd_pool)
-                    _bf_pads  = column_pads(_bf_dis, _sd_full)
+                    _bf_start = min(_sd_start, max(0, len(_sd_full) - _bf_n))
+                    _bf_dis   = list(range(_bf_start, _bf_start + _bf_n))  # window indices
+                    # Build the fully-aligned skeleton over the WHOLE history (seed =
+                    # true oldest draw), then reclaim — for this display window — the SL
+                    # runs that are dead across every shown column, removed uniformly so
+                    # no surviving number ever shifts row (window-global reclamation).
+                    # Because the oldest shown column now carries inherited holes from
+                    # older-than-window draws, a recent window compacts to just its live
+                    # groups instead of the full-height skeleton.
+                    _bf_all   = list(range(len(_sd_full)))
+                    _bf_cols, _bf_pads = reclaim_window_dead_runs(
+                        render_columns(_bf_all, _sd_full, _sd_pool),
+                        column_pads(_bf_all, _sd_full), _bf_dis)
                     _CELL_H   = 22          # px — fixed so columns align cell-for-cell
                     _WALL     = "#FFFFFF"   # fresh no-contrast hole = solid white wall
                     _CATCH    = "#8B6F47"   # catch hole = one fixed muted brown (round 7)
@@ -3385,10 +3492,11 @@ elif page == "🧩 Variable Inputs":
                     # per-draw fresh/repeat caption (mirrors cascading)
                     _bf_caption = []
                     for _j in range(_bf_n):
-                        _draw = _sd_full[_j]
+                        _di   = _bf_dis[_j]
+                        _draw = _sd_full[_di]
                         _cur  = _draw["nums"]
-                        if _j + 1 < len(_sd_full):
-                            _prev = _sd_full[_j + 1]["nums"]
+                        if _di + 1 < len(_sd_full):
+                            _prev = _sd_full[_di + 1]["nums"]
                             _fr = sorted(_cur - _prev)
                             _rp = sorted(_cur & _prev)
                         else:
@@ -3402,7 +3510,7 @@ elif page == "🧩 Variable Inputs":
                     _bf_html = ["<div style='display:flex;flex-direction:row;gap:6px;"
                                 "overflow-x:auto;align-items:flex-start'>"]
                     for _j in range(_bf_n):
-                        _draw  = _sd_full[_j]
+                        _draw  = _sd_full[_bf_dis[_j]]
                         _rails = group_rail_flags(_bf_cols[_j])
                         _grp   = visible_group_count(_bf_cols[_j])
                         _bf_html.append(
@@ -3450,17 +3558,20 @@ elif page == "🧩 Variable Inputs":
                     st.markdown("".join(_bf_sw), unsafe_allow_html=True)
 
                     st.caption(
-                        f"Blocked flat — SL vs full {len(_sd_full)} draws; showing newest "
-                        f"{_bf_n} (newest left). Columns align recursively: the oldest "
-                        f"shown (D{_sd_full[_bf_n - 1]['draw']}) seeds the skeleton, so the "
-                        "slider sets the reference frame. Each newer column lifts its "
+                        f"Blocked flat — SL vs full {len(_sd_full)} draws; showing "
+                        f"{_bf_n} draws from D{_sd_full[_bf_dis[0]]['draw']} (left) back "
+                        f"to D{_sd_full[_bf_dis[-1]]['draw']} (newest left). The skeleton "
+                        f"is seeded at the true oldest draw and aligns cell-for-cell; each "
+                        "newer column lifts its "
                         "winners to a top block and leaves their old cells as holes: "
                         "white = wall (no contrasting neighbour), brown = blocked "
                         "(caught by a group neighbour) — both persist across draws. "
                         "Deep = repeat (this draw only). The gray rail marks each group's "
                         "extent (running through inherited holes); “N grp” = distinct "
-                        "since-last groups = what 'max groups' consumes. Recent-window "
-                        "tool — large slider values make very tall columns.")
+                        "since-last groups = what 'max groups' consumes. Groups that are "
+                        "dead across the whole shown window are reclaimed (removed from "
+                        "every column together), so surviving numbers never shift row and "
+                        "a recent window stays compact instead of full-height.")
                     st.caption("  •  ".join(_bf_caption))
                 elif _sd_view == "Cascading (lineage)":
                     # Compute cascading order ONCE over the FULL history (the one-time
@@ -3472,7 +3583,7 @@ elif page == "🧩 Variable Inputs":
                     # instead of collapsing into rows 1-6. The oldest displayed draw has
                     # no older neighbour, so it falls back to its own deck.
                     _sd_casc = _sd_cascading_order(_sd_full, _sd_pool)  # newest-first
-                    for _di in range(min(_sd_n, len(_sd_casc))):
+                    for _di in range(_sd_start, min(_sd_start + _sd_n, len(_sd_casc))):
                         _dl, _date, _ = _sd_casc[_di]
                         _inc = _di + 1 if _di + 1 < len(_sd_casc) else _di
                         _ord = _sd_casc[_inc][2]          # incoming (pre-reset) deck
@@ -3493,11 +3604,12 @@ elif page == "🧩 Variable Inputs":
                 else:
                     # Flat rank — each column ranked independently by its own SL
                     # (present order). The diagonal staircase emerges naturally as a
-                    # number's SL grows in older columns. Unchanged legacy behaviour.
-                    for _di in range(min(_sd_n, len(_sd_rows))):
-                        _ord, _sld = _sd_present_order(_di, _sd_rows, _sd_pool)
-                        _sd_draws_data.append((_sd_rows[_di]["draw"],
-                                               _sd_rows[_di]["date"],
+                    # number's SL grows in older columns. Uses the full history (so SL
+                    # look-back is never truncated) and honours the window offset.
+                    for _di in range(_sd_start, min(_sd_start + _sd_n, len(_sd_full))):
+                        _ord, _sld = _sd_present_order(_di, _sd_full, _sd_pool)
+                        _sd_draws_data.append((_sd_full[_di]["draw"],
+                                               _sd_full[_di]["date"],
                                                _ord, _sld))
 
                 if _sd_view == "Blocked flat (all_wt)":
@@ -4756,6 +4868,83 @@ elif page == "🧩 Variable Inputs":
         "Container Dashboards load these automatically before formula-level SC."
     )
 
+    # ── Reference Group (RefGroup_w1) — Selected/Unselected breakdown ─────────
+    # The newest completed draw's `pick` winning numbers vs the full C(pool,pick)
+    # space, split S0..S_pick, then Selected{1,2,3}/Unselected{0,4,5,6}. Reads
+    # the SAME draw_history.csv the Stacked Draws views use (read-only), so it
+    # auto-updates to whatever the newest draw is on every load. Closed-form
+    # (Option A, 2026-07-13): the breakdown is a fixed hypergeometric property —
+    # the numbers NEVER change week to week, only WHICH 6 numbers are labelled
+    # RefGroup_w1. See syndicate_core/refgroup.py.
+    with st.expander(f"🎯 Reference Group ({_REFGROUP_LABEL}) — Selected / Unselected",
+                     expanded=False):
+        _rg_cfg  = active_game_cfg()
+        _rg_pool = int(_rg_cfg.get("pool", 45))
+        _rg_pick = int(_rg_cfg.get("pick", 6))
+        _rg_hist_path = (
+            _gdirs.get("SinceLast", _gdirs.get("Base", Path(".")))
+            / "draw_history.csv"
+        )
+        _rg_nums = load_newest_reference(_rg_hist_path, _rg_pick)
+
+        if _rg_nums is None:
+            st.markdown(
+                '<div class="warn">⚠️ No usable newest draw. Load draw history '
+                'in the <b>Stats</b> tab (Draw History → Fetch) — RefGroup_w1 '
+                'reads its numbers from the newest row of draw_history.csv.</div>',
+                unsafe_allow_html=True)
+        else:
+            _rg_bd    = hypergeometric_breakdown(_rg_pool, _rg_pick)
+            _rg_total = total_space(_rg_pool, _rg_pick)
+            _rg_bands = selected_bands_for_pick(_rg_pick)   # locked split per game
+            _rg_sel, _rg_unsel = selected_unselected(_rg_bd, _rg_bands)
+            _rg_sel_lbl = "+".join(f"S{k}" for k in _rg_bands)
+            _rg_uns_lbl = "+".join(
+                f"S{k}" for k in range(_rg_pick + 1) if k not in set(_rg_bands))
+
+            # Current reference numbers as coloured chips (labels — these DO
+            # change each week; the breakdown below does not).
+            _rg_chips = " ".join(
+                f'<span style="background:{_bg};color:{_fg};padding:2px 8px;'
+                f'border-radius:4px;font-weight:600;margin:0 2px">{_n}</span>'
+                for _n, (_bg, _fg) in ((n, _num_colour(n)) for n in _rg_nums))
+            st.markdown(
+                f'<div style="margin:.25rem 0 .5rem">'
+                f'<b>{_REFGROUP_LABEL}</b> (updates automatically each week): '
+                f'{_rg_chips}</div>', unsafe_allow_html=True)
+            st.caption(
+                f"Newest draw of {active_game()} · matched against the full "
+                f"C({_rg_pool},{_rg_pick}) = {_rg_total:,} combination space. "
+                "The breakdown is mathematically identical for ANY "
+                f"{_rg_pick}-number reference set — it does NOT change when the "
+                "newest draw changes; only the numbers above do.")
+
+            # S0..S_pick table: raw counts + % of the full space.
+            _rg_tbl = pd.DataFrame(
+                [{"Band": f"S{k}",
+                  "Count": _rg_bd[k],
+                  "% of space": round(100 * _rg_bd[k] / _rg_total, 4)}
+                 for k in range(_rg_pick + 1)])
+            st.dataframe(_rg_tbl, hide_index=True, use_container_width=True)
+
+            _rg_c1, _rg_c2 = st.columns(2)
+            _rg_c1.metric(
+                f"Selected / Repeat  ({_rg_sel_lbl})",
+                f"{_rg_sel:,}",
+                f"{100 * _rg_sel / _rg_total:.2f}% of space",
+                delta_color="off")
+            _rg_c2.metric(
+                f"Unselected / No_repeat  ({_rg_uns_lbl})",
+                f"{_rg_unsel:,}",
+                f"{100 * _rg_unsel / _rg_total:.2f}% of space",
+                delta_color="off")
+            st.caption(
+                "RefGroup_w1 has no standalone SC file; it rides the combined "
+                "CVI export as the last block (next sequential Row_ID from "
+                "execute_collation), recomputed fresh every collation.")
+
+    st.markdown("---")
+
     # ── Helper: detect n-columns from main data (mirrors run_matching heuristic) ──
     def _vi_n_cols(mdf: pd.DataFrame) -> list:
         _exp = [c for c in mdf.columns if re.match(r'^n\d+$', c, re.I)]
@@ -4808,6 +4997,94 @@ elif page == "🧩 Variable Inputs":
                         st.info(f"⏭ {_var} — skipped ({_res['reason']})")
                     else:
                         st.error(f"❌ {_var} — error: {_res['reason']}")
+
+    st.markdown("---")
+
+    # ── Repeat / No_repeat SC — LOCKED preset (confirmed 2026-07-15) ──────────
+    # One-click preset: applies the LOCKED per-game split (Selected={1..K-3},
+    # Unselected={0}∪{K-2,K-1,K}) automatically for whichever game is active —
+    # no manual threshold entry. Counts are computed against REAL main data
+    # (empirical isin, never the closed form). Additive: sits beside the manual
+    # per-variable SC workflow below and never replaces it. See
+    # syndicate_core/refgroup.py (selected_bands_for_pick / empirical_stream_counts).
+    with st.expander("🔁 Compute Repeat/No_repeat SC (locked preset)", expanded=False):
+        _ps_cfg  = active_game_cfg()
+        _ps_pick = int(_ps_cfg.get("pick", 6))
+        _ps_pool = int(_ps_cfg.get("pool", 45))
+        _ps_bands = selected_bands_for_pick(_ps_pick)
+        _ps_sel_lbl = "{" + ",".join(str(k) for k in _ps_bands) + "}"
+        _ps_uns_lbl = "{" + ",".join(
+            str(k) for k in range(_ps_pick + 1) if k not in set(_ps_bands)) + "}"
+        st.markdown(
+            f'<div class="info"><b>{active_game()}</b> (pick {_ps_pick}) — locked '
+            f'split: <b>Selected/Repeat</b> = S{_ps_sel_lbl} · '
+            f'<b>Unselected/No_repeat</b> = S{_ps_uns_lbl}. '
+            'Applied automatically; no thresholds to enter.</div>',
+            unsafe_allow_html=True)
+
+        _ps_hist_path = (
+            _gdirs.get("SinceLast", _gdirs.get("Base", Path(".")))
+            / "draw_history.csv"
+        )
+        _ps_ref = load_newest_reference(_ps_hist_path, _ps_pick)
+        if _ps_ref is None:
+            st.markdown(
+                '<div class="warn">⚠️ No usable newest draw — load draw history '
+                '(Stats → Draw History → Fetch) to set RefGroup_w1.</div>',
+                unsafe_allow_html=True)
+        else:
+            st.caption(f"RefGroup_w1 (newest {active_game()} draw): {_ps_ref}")
+
+        if st.button("🔁 Compute Repeat/No_repeat SC (locked preset)",
+                     key=f"rnr_sc_{_gkey}", use_container_width=True,
+                     help="Bucket the real main data by shared count vs RefGroup_w1 "
+                          "and apply the locked Selected/Unselected split."):
+            if _vi_main.empty:
+                st.warning("⚠️ Main Data not loaded — load it in Container Dashboards first.")
+            elif _ps_ref is None:
+                st.warning("⚠️ No usable newest draw to use as RefGroup_w1.")
+            else:
+                _ps_ncols = _vi_n_cols(_vi_main)
+                if not _ps_ncols:
+                    st.warning("⚠️ Main Data has no numeric n-columns.")
+                else:
+                    with st.spinner(f"Matching {len(_vi_main):,} real main-data rows…"):
+                        _ps_res = empirical_stream_counts(
+                            _vi_main, _ps_ncols, _ps_ref, _ps_pick)
+                    _ps_M = _ps_res["M"]
+                    _ps_tbl = pd.DataFrame([
+                        {"Band": f"S{k}",
+                         "Stream": ("Repeat" if k in set(_ps_bands) else "No_repeat"),
+                         "Count": _ps_res["bands"][k],
+                         "% of M": round(100 * _ps_res["bands"][k] / _ps_M, 4)}
+                        for k in range(_ps_pick + 1)])
+                    st.dataframe(_ps_tbl, hide_index=True, use_container_width=True)
+                    _ps_a, _ps_b = st.columns(2)
+                    _ps_a.metric(f"Repeat / Selected  S{_ps_sel_lbl}",
+                                 f"{_ps_res['selected']:,}",
+                                 f"{100 * _ps_res['selected'] / _ps_M:.2f}% of M",
+                                 delta_color="off")
+                    _ps_b.metric(f"No_repeat / Unselected  S{_ps_uns_lbl}",
+                                 f"{_ps_res['unselected']:,}",
+                                 f"{100 * _ps_res['unselected'] / _ps_M:.2f}% of M",
+                                 delta_color="off")
+                    st.caption(
+                        f"Computed against real main data (M = {_ps_M:,} rows), "
+                        "not the closed form.")
+                    # Preset sc_dict this split maps to — additive preview/export,
+                    # does NOT overwrite any manual SC_{VAR}_{game}.csv file.
+                    _ps_wcols = [f"w{i+1}" for i in range(_ps_pick)]
+                    _ps_scd = locked_sc_dict(_ps_wcols, _ps_pick)
+                    _ps_sc_df = pd.DataFrame(
+                        [{"w": w, "Selected Count": ",".join(map(str, v))}
+                         for w, v in _ps_scd.items()])
+                    st.markdown("**Preset Selected Counts (locked split, every w):**")
+                    st.dataframe(_ps_sc_df, hide_index=True, use_container_width=True)
+                    st.download_button(
+                        "⬇ Repeat/No_repeat preset SC (.csv)",
+                        to_csv_bytes(_ps_sc_df),
+                        f"SC_RepeatNoRepeat_{_gkey}.csv", "text/csv",
+                        key=f"rnr_sc_dl_{_gkey}")
 
     st.markdown("---")
 
@@ -5064,13 +5341,38 @@ elif page == "📦 Container Formula":
     st.markdown("---")
 
     if st.button(f"▶ Collate {chosen_f}", type="primary", use_container_width=True):
+        # RefGroup_w1 rides the combined CVI as a 7th block (1 row) — the newest
+        # completed draw's numbers, pulled at collation time so the export always
+        # reflects the current newest draw. execute_collation appends it LAST, so
+        # it gets the next sequential Row_ID by construction (never hardcoded).
+        # Its Main_Breakdown is filled by the same _match_cvi_rows engine every
+        # other row uses (Option B) when Per-Row CVI Match runs downstream.
+        _cf_pick = int(active_game_cfg().get("pick", 6))
+        _cf_hist_path = (
+            _gdirs.get("SinceLast", _gdirs.get("Base", Path(".")))
+            / "draw_history.csv"
+        )
+        _cf_ref = load_newest_reference(_cf_hist_path, _cf_pick)
         with st.spinner("Collating…"):
-            result = execute_collation(comps)
+            result = execute_collation(comps, ref_group=_cf_ref)
         if result.empty:
             st.error("Result empty — load components in Variable Inputs first.")
         else:
             out = _gdirs["CVI"] / f"CVI_{chosen_f}.csv"
             result.to_csv(out, index=False)
+            if _cf_ref is not None:
+                st.markdown(
+                    f'<div class="note">🎯 <b>{_REFGROUP_LABEL}</b> appended as the '
+                    f'last block (Row_ID {int(result["Row_ID"].max())}) — newest '
+                    f'draw {_cf_ref}. Its S0–S{_cf_pick} breakdown fills via the '
+                    'Per-Row CVI Match engine like every other row.</div>',
+                    unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    '<div class="warn">⚠️ No usable newest draw — CVI exported '
+                    f'WITHOUT {_REFGROUP_LABEL}. Load draw history (Stats → Draw '
+                    'History → Fetch) to include it.</div>',
+                    unsafe_allow_html=True)
             st.session_state.setdefault(gkey("cvi"), {})[chosen_f] = result
             n_wcols = sum(1 for c in result.columns if str(c).startswith("w"))
             st.markdown(f'<div class="ok">✅ {chosen_f}: {len(result):,} rows '
@@ -5520,6 +5822,169 @@ elif page == "🖥️ Container Dashboards":
             else:
                 st.caption("No precomputed result found yet — run the command "
                            "above, then reopen this dashboard.")
+
+    # ── Formula Groups (4-group · RefGroup split) ────────────────────────
+    # Runs the 4 formula groups (R / D / B1 / Ep+So+Sp+B2) against the Main
+    # Data pool split into Repeat/No_Repeat by Rule 1 (nonzero/zero vs the
+    # newest draw), via syndicate_core.collation._run_formula_groups. Narrowing
+    # + escalations are pass-through seams this pass; the target-window control
+    # flow and skip-and-log are live. execute_collation is passed as collate_fn
+    # (the runner lives in syndicate_core and can't import the UI layer). Lazy —
+    # nothing splits or runs until the expander is opened and the button clicked.
+    with st.expander("🧩 Formula Groups (4-group · RefGroup split)", expanded=False):
+        st.caption(
+            "Each group's candidates matched against the Main Data pool split "
+            "into Repeat/No_Repeat by Rule 1 (nonzero/zero vs the newest draw). "
+            "Narrowing + escalation are seams (not yet tuned); the target window "
+            "and skip-and-log are live.")
+        _fg_pick = int(_gcfg["pick"])
+        _fg_pool = int(_gcfg["pool"])
+        _fg_hist_path = (_gdirs.get("SinceLast", _gdirs.get("Base", Path(".")))
+                         / "draw_history.csv")
+        _fg_ref = load_newest_reference(_fg_hist_path, _fg_pick)
+        if main_df is None or main_df.empty:
+            st.info("Load Main Data above to run formula groups.")
+        elif _fg_ref is None:
+            st.warning("No usable newest draw — load draw history "
+                       "(Stats → Draw History → Fetch) to set the RefGroup split.")
+        else:
+            _fg_ncols = [c for c in main_df.columns
+                         if re.match(r'^n?\d+$', str(c), re.I)]
+            if not _fg_ncols:
+                _fg_ncols = [c for c in main_df.columns
+                             if pd.api.types.is_numeric_dtype(main_df[c])]
+            st.caption(
+                f"RefGroup (newest {_gkey} draw): {_fg_ref} · Main Data "
+                f"{len(main_df):,} rows × {len(_fg_ncols)} number-cols · "
+                f"pool 1–{_fg_pool} · target window [10, 20]")
+            if not _fg_ncols:
+                st.error("Could not detect Main Data number columns.")
+            elif st.button("🧩 Run 4 formula groups", key=f"fg_run_{db}",
+                           type="primary"):
+                _fg_cache = _gdirs["Main_Data"] / "_split_cache"
+                try:
+                    _fg_hist_df = (pd.read_csv(_fg_hist_path, dtype=str)
+                                   if _fg_hist_path.exists() else None)
+                except Exception:
+                    _fg_hist_df = None
+                with st.spinner("Splitting Main Data by RefGroup + running groups…"):
+                    _fg_split = load_or_build_split(
+                        main_df, _fg_ncols, _fg_ref, _fg_cache)
+                    _fg_ctx = EscalationContext(
+                        ref_numbers=tuple(_fg_ref), history_df=_fg_hist_df,
+                        pool=_fg_pool, pick=_fg_pick, game_key=_gkey)
+                    _fg_results = _run_formula_groups(
+                        FORMULA_GROUPS, execute_collation, _fg_split,
+                        _fg_ncols, _fg_ctx)
+                _fg_m = _fg_split.get("_meta", {})
+                st.success(
+                    f"✅ Split {'rebuilt' if _fg_m.get('rebuilt') else 'from cache'}"
+                    f" — Repeat {_fg_m.get('n_repeat', 0):,} / "
+                    f"No_Repeat {_fg_m.get('n_no_repeat', 0):,}. "
+                    f"Ran {len(_fg_results)} groups.")
+                _fg_rows = []
+                for _grp_key, _fg_gr in _fg_results.items():
+                    _grp = next((g for g in FORMULA_GROUPS
+                                 if g.key == _grp_key), None)
+                    _fg_comp = "+".join(_grp.components) if _grp else "—"
+                    if _fg_gr["status"] != "ok":
+                        _fg_rows.append({
+                            "Group": _grp_key, "Components": _fg_comp,
+                            "Stream": "—", "Status": _fg_gr["status"],
+                            "Survivors": "—", "Unit": "—", "Escalated": "—",
+                            "Flag/Reason": _fg_gr.get("reason") or "—"})
+                        continue
+                    for _fg_sn, _fg_s in _fg_gr["streams"].items():
+                        # Survivors count means different things per unit —
+                        # "main_data_rows" (Main Data rows kept by the pivot) vs
+                        # "candidates" (candidate rows). Label it explicitly so a
+                        # 4.87M pivot count is never read as surviving candidates.
+                        _fg_unit = _fg_s.get("unit", "—")
+                        _fg_flag = _fg_s.get("flag") or _fg_s.get("reason") or "—"
+                        # A target_range flag on a non-candidate unit is an artifact
+                        # of comparing Main-Data-scale counts to a candidate window
+                        # (not a real signal until the later per-row chain exists).
+                        if (not _fg_s.get("target_range_meaningful", True)
+                                and _fg_s.get("flag")):
+                            _fg_flag = f"{_fg_s['flag']} (target n/a — {_fg_unit})"
+                        _fg_rows.append({
+                            "Group": _grp_key, "Components": _fg_comp,
+                            "Stream": _fg_sn, "Status": _fg_s["status"],
+                            "Survivors": _fg_s.get("n", "—"), "Unit": _fg_unit,
+                            "Escalated": _fg_s.get("escalated", "—"),
+                            "Flag/Reason": _fg_flag})
+                _fg_tbl = pd.DataFrame(_fg_rows)
+                show_paginated_df(_fg_tbl, key=f"fg_res_{db}",
+                                  use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇ Formula-group results CSV", to_csv_bytes(_fg_tbl),
+                    f"formula_groups_{_gkey}.csv", "text/csv",
+                    key=f"fg_dl_{db}")
+
+    # ── B1 Parallel Main-Count — CVI rows vs the whole B1 source ─────────
+    # Same per-row engine as above, but the pool is B1 (unfiltered — B1's
+    # draw-number column is populated for only a handful of rows, so it can't
+    # be draw-scoped; it is matched whole). Game-agnostic: the source resolves
+    # via game_dirs()["Base"] through b1_path(), never a hardcoded sat path.
+    # Toggleable — nothing loads or computes until the expander is opened and
+    # the button pressed.
+    with st.expander("🅱️ B1 Parallel Main-Count", expanded=False):
+        st.caption(
+            "Each CVI row's own numbers matched against every B1 row "
+            "independently — same engine as Per-Row CVI Match, but the pool is "
+            "the B1 source (matched whole, no draw filtering). Columns: Row, "
+            "Row_ID, Source, Set_Label, Row_Length, B1_Count, B1_Breakdown.")
+
+        _b1_src = b1_path(_gkey)
+        if _b1_src is None:
+            st.info(f"No B1 source found for **{_gkey}** under "
+                    f"`{_gdirs['Base'].name}/` (only games with a split "
+                    "B1 file support this).")
+        elif cvi_df.empty:
+            st.info("Load a CVI above to enable the B1 parallel match.")
+        else:
+            _b1_pool = int(_gcfg["pool"])
+            _b1_pick = int(_gcfg["pick"])
+            _b1_df = pd.read_csv(_b1_src)
+
+            # Detect ball columns by pattern + position, NOT literal pos_1..N —
+            # survives a future pos_ → w_row/w rename (logic in pipeline.py so
+            # it stays testable; masterapp is UI-only).
+            _b1_cols = b1_ball_columns(_b1_df, _b1_pick)
+
+            st.caption(
+                f"B1 source: **{_b1_src.name}** · **{len(_b1_df):,}** rows × "
+                f"{len(_b1_cols)} ball-cols "
+                f"({', '.join(str(c) for c in _b1_cols) or 'none detected'}) · "
+                f"CVI rows **{len(cvi_df):,}** · pool 1–{_b1_pool}")
+
+            if not _b1_cols:
+                st.error("Could not detect B1 ball columns.")
+            elif st.button(
+                    f"🅱️ Compute B1 parallel match ({len(cvi_df):,} CVI rows)",
+                    key=f"b1_run_{db}", type="primary"):
+                # main_arr WITHOUT np.clip — out-of-range values become 0 and
+                # are excluded from matching, never fabricated (mirrors the
+                # Per-Row CVI Match array build above).
+                _b1_raw = (_b1_df[_b1_cols].apply(pd.to_numeric, errors="coerce")
+                           .to_numpy(dtype=np.float64))
+                _b1_raw = np.nan_to_num(_b1_raw, nan=0.0)
+                _b1_arr = np.where((_b1_raw >= 1) & (_b1_raw <= _b1_pool),
+                                   _b1_raw, 0).astype(np.int32)
+                with st.spinner(f"Matching {len(cvi_df):,} CVI rows against "
+                                f"{len(_b1_df):,} B1 rows…"):
+                    _b1_res = _match_cvi_rows(
+                        cvi_df, _b1_arr, pool_max=_b1_pool
+                    ).rename(columns={"Main_Count":     "B1_Count",
+                                      "Main_Breakdown": "B1_Breakdown"})
+                st.success(f"✅ Matched {len(_b1_res):,} rows against B1.")
+                show_paginated_df(_b1_res.head(200), key=f"b1_res_{db}",
+                                  use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇ Download B1 parallel match CSV",
+                    to_csv_bytes(_b1_res),
+                    f"CVI_b1_match_{_gkey}_{formula_name}.csv",
+                    "text/csv", key=f"b1_dl_{db}")
 
     st.markdown("---")
 

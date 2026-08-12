@@ -21,6 +21,7 @@ from syndicate_core.stacked_blocks import (
     decorate_newest,
     deep_repeats,
     group_rail_flags,
+    reclaim_window_dead_runs,
     render_columns,
     since_last_map,
     visible_group_count,
@@ -326,3 +327,90 @@ def test_group_count_identity_matches_distinct_sl(history, idx, ncols):
     for j, col in enumerate(cols):
         distinct_sl = len(set(since_last_map(dis[j], history, POOL).values()))
         assert visible_group_count(col) == distinct_sl
+
+
+# ── window-global reclamation (reclaim_window_dead_runs) ─────────────────────
+# The redesign: an SL run's shared-grid space is reclaimed only if the run is
+# dead (zero survivors) across the WHOLE displayed window — evaluated once, and
+# removed UNIFORMLY from every column so no surviving number ever shifts row.
+# For the full-range export (oldest column = clean seed) nothing is reclaimed;
+# savings appear in a recent sub-window of the full skeleton.
+
+def _num_rows(cols, pads):
+    """{number: absolute_row} per column, for numbers shown as a num."""
+    return [{c[1]: pads[j] + i for i, c in enumerate(col) if c[0] == "num"}
+            for j, col in enumerate(cols)]
+
+
+def _row_position_violations(cols, pads, dis, history):
+    """A number that is a num in two adjacent displayed columns and did NOT win
+    at the newer draw must sit at the same absolute row (the regression we fix)."""
+    nr = _num_rows(cols, pads)
+    v = 0
+    for j in range(len(dis) - 1):
+        winners_newer = set(history[dis[j]]["nums"])
+        for x in set(nr[j]) & set(nr[j + 1]):
+            if x not in winners_newer and nr[j][x] != nr[j + 1][x]:
+                v += 1
+    return v
+
+
+def _is_subsequence(small, big):
+    it = iter(big)
+    return all(cell in it for cell in small)
+
+
+def test_reclaim_full_window_is_noop(history, idx):
+    """Displaying the whole history reclaims nothing — its oldest column is the
+    clean all_wt seed (no dead run) — so the aligned view is returned unchanged."""
+    dis = list(range(len(history)))
+    cols = render_columns(dis, history, POOL)
+    pads = column_pads(dis, history)
+    rcols, rpads = reclaim_window_dead_runs(cols, pads, dis)
+    assert rcols == cols
+    assert rpads == pads
+
+
+def test_reclaim_full_window_has_no_row_position_drift(history, idx):
+    """The full-range export view (every column displayed): zero row-position
+    violations — the alignment regression the window-global rule restores."""
+    dis = list(range(len(history)))
+    cols = render_columns(dis, history, POOL)
+    pads = column_pads(dis, history)
+    rcols, rpads = reclaim_window_dead_runs(cols, pads, dis)
+    assert _row_position_violations(rcols, rpads, dis, history) == 0
+
+
+def test_reclaim_recent_window_saves_space_without_drift(history, idx):
+    """A recent sub-window of the full skeleton: dead-throughout runs are
+    reclaimed (real space saving) yet no surviving number shifts row (0
+    violations), N-grp is unchanged, and every number still appears once."""
+    full = list(range(len(history)))
+    cols = render_columns(full, history, POOL)
+    pads = column_pads(full, history)
+    dis = list(range(min(10, len(history))))            # newest ≤10 draws
+    rcols, rpads = reclaim_window_dead_runs(cols, pads, dis)
+
+    assert sum(len(c) for c in rcols) < sum(len(cols[j]) for j in dis)   # saved
+    assert _row_position_violations(rcols, rpads, dis, history) == 0
+    assert ([visible_group_count(cols[j]) for j in dis]
+            == [visible_group_count(c) for c in rcols])                  # N-grp
+    for col in rcols:
+        assert sorted(c[1] for c in col if c[0] == "num") == list(range(1, POOL + 1))
+
+
+def test_reclaim_removes_rows_uniformly(history, idx):
+    """Reclamation only ever DROPS rows (never reorders/edits): each displayed
+    column's result is a subsequence of its aligned column — the uniform removal
+    that keeps every column mutually aligned."""
+    full = list(range(len(history)))
+    cols = render_columns(full, history, POOL)
+    pads = column_pads(full, history)
+    dis = list(range(min(10, len(history))))
+    rcols, _ = reclaim_window_dead_runs(cols, pads, dis)
+    for k, j in enumerate(dis):
+        assert _is_subsequence(rcols[k], cols[j])
+
+
+def test_reclaim_empty_window():
+    assert reclaim_window_dead_runs([], [], []) == ([], [])

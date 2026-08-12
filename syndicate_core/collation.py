@@ -15,6 +15,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from syndicate_core.escalation import ESCALATIONS
+from syndicate_core.config import NARROW_ROUTES
+from syndicate_core.refgroup import selected_bands_for_pick
+
 __all__ = [
     "_to_w_rows",
     "_compute_sc_block",
@@ -22,6 +26,10 @@ __all__ = [
     "_save_sc_block",
     "_load_sc_blocks",
     "_run_sc_auto",
+    "_default_narrow",
+    "_refgroup_w1_pivot",
+    "NARROW_FNS",
+    "_run_formula_groups",
 ]
 
 # Carry-forward flags used by _run_sc_auto callers
@@ -327,4 +335,175 @@ def _run_sc_auto(
                             "reason": "_compute_sc_block returned empty"}
             continue
         results[var] = {"status": "ok", "distributions": counts_dict, "path": None}
+    return results
+
+
+# ── Formula-group runner (4-group RefGroup-split restructure) ──────────────────
+
+def _default_narrow(candidates_df, stream_df, n_cols, *, ctx):
+    """Default per-stream narrowing — PASS-THROUGH seam.
+
+    Returns the candidate set untouched. The real narrowing criterion (Rule 2
+    beyond w1 / the Rule 6 Selected/Unselected boundary) is an OPEN question in
+    the LOCKED rules, so this is a seam like the escalation stubs: the runner's
+    control flow is real and tested, and the survivor rule drops in later without
+    signature churn. Signature mirrors the escalations so either can be injected.
+    """
+    logging.info("default_narrow not yet tuned — pass-through (%d candidates)",
+                 len(candidates_df))
+    return candidates_df
+
+
+# The pass-through stub narrows the CANDIDATE set (returns candidate rows).
+_default_narrow.unit = "candidates"
+
+
+def _refgroup_w1_pivot(candidates_df, stream_df, n_cols, *, ctx):
+    """RefGroup_w1 pivot — the first REAL narrowing stage (G1 / Repeat only).
+
+    Filters Main Data ROWS (``stream_df``), NOT candidates: keeps rows sharing
+    ``{1..pick-3}`` numbers with the reference draw (``ctx.ref_numbers``), drops
+    the rare ``{pick-2,pick-1,pick}`` sliver. On the Rule-1 Repeat pool this is
+    the exact, verified stage — for sat it takes 4,882,437 → 4,871,087 (drops
+    11,350). ``shared==0`` cannot occur in a Repeat pool (Rule 1 already excluded
+    it), so no special handling. ``candidates_df`` is ignored — R's real
+    narrowing filters Main Data, using its own rows as the filter sequence.
+
+    Its survivor count is a MAIN-DATA-ROW count, not a candidate count — reported
+    as ``unit="main_data_rows"`` so it is never mistaken for surviving candidates.
+    Wired ONLY to G1's Repeat stream via config.NARROW_ROUTES; never global. This
+    is stage ONE only — the subsequent per-row chain does NOT exist yet.
+    """
+    if stream_df is None or (hasattr(stream_df, "empty") and stream_df.empty):
+        return stream_df if stream_df is not None else pd.DataFrame()
+    keep = list(selected_bands_for_pick(ctx.pick))            # {1 .. pick-3}
+    ref = np.array(sorted({int(n) for n in ctx.ref_numbers}), dtype=np.int64)
+    arr = stream_df[list(n_cols)].to_numpy()
+    shared = np.isin(arr, ref).sum(axis=1)
+    mask = np.isin(shared, keep)
+    return stream_df[mask].reset_index(drop=True)
+
+
+# Returns Main Data ROWS, so its survivor count is a main-data-row count.
+_refgroup_w1_pivot.unit = "main_data_rows"
+
+
+# Narrowing-strategy registry: name → callable. config.NARROW_ROUTES maps a
+# (group.narrow, stream) pair to one of these names; the runner resolves it here.
+NARROW_FNS = {
+    "default": _default_narrow,
+    "refgroup_w1_pivot": _refgroup_w1_pivot,
+}
+
+
+def _narrow_one_stream(group, candidates, stream_df, n_cols, ctx,
+                       narrow_fn, escalations) -> dict:
+    """Narrow one group's candidates against one Main Data stream.
+
+    Applies ``narrow_fn`` then, only when the survivor count is ABOVE the
+    group's target_range, the named escalation. Below the window is log-only
+    (escalation cannot manufacture rows); still-out-of-range after escalation is
+    flagged ``out_of_range_after_escalation`` but let through unblocked. Any
+    exception is caught and reported so one stream never blocks the others.
+
+    ``unit`` records what the survivor count counts — ``"candidates"`` for the
+    pass-through stub, ``"main_data_rows"`` for the RefGroup_w1 pivot (declared on
+    the narrow fn). ``target_range_meaningful`` is False for non-candidate units:
+    comparing a Main-Data-scale count against target_range (a candidate window) is
+    not a real check yet, so a resulting ``out_of_range_after_escalation`` flag is
+    an artifact of mismatched units, NOT a signal that anything is wrong.
+    """
+    lo, hi = group.target_range
+    unit = getattr(narrow_fn, "unit", "candidates")
+    try:
+        narrowed = narrow_fn(candidates, stream_df, n_cols, ctx=ctx)
+        n = len(narrowed)
+        escalated, flag = False, None
+        if n > hi:
+            fn = escalations.get(group.escalate)
+            if fn is None:
+                return {"status": "error",
+                        "reason": f"unknown escalation {group.escalate!r}"}
+            narrowed = fn(narrowed, stream_df, n_cols, ctx=ctx)
+            n = len(narrowed)
+            escalated = True
+            if not (lo <= n <= hi):
+                flag = "out_of_range_after_escalation"
+        elif n < lo:
+            flag = "below_target"
+        return {"status": "ok", "n": n, "escalated": escalated, "flag": flag,
+                "unit": unit, "target_range_meaningful": unit == "candidates"}
+    except Exception as ex:
+        logging.warning("_run_formula_groups [%s/%s]: narrow error: %s",
+                        group.key, getattr(stream_df, "attrs", {}), ex)
+        return {"status": "error", "reason": str(ex)}
+
+
+def _run_formula_groups(groups, collate_fn, split, n_cols, ctx, *,
+                        narrow_fn=_default_narrow, escalations=ESCALATIONS,
+                        split_override=None) -> dict:
+    """Run each formula group against the Repeat / No_Repeat Main Data split.
+
+    Registry-driven, formula-agnostic (everything comes from ``group``), and
+    skip-and-log: one group's failure never blocks the others. ``collate_fn`` is
+    injected (``execute_collation`` lives in the UI layer and can't be imported
+    here); it maps a group's components tuple to that group's candidate CVI.
+    ``split`` is the main_split output — any non-stream key (e.g. ``_meta``) is
+    ignored.
+
+    **Split vs no-split (per group, per run).** Each group's DEFAULT is
+    ``group.uses_main_data_split`` (True → narrow once per Main Data stream;
+    False → narrow once, independent of the split — e.g. R, whose narrowing never
+    touches Main Data). ``split_override`` (``{group.key: bool}``) overrides that
+    default for THIS run only, no config edit: ``{"G1": True}`` runs R against the
+    split for research/tracing. The mode is reported per group as ``"mode"``.
+
+    NOTE: in no-split mode the single call is made with ``stream_df=None`` — safe
+    for narrowing/escalations that ignore the stream (the only kind a group should
+    default no-split for). A future no-split group whose narrow/escalation DOES
+    consume Main Data would receive ``None`` here; that is a known risk to watch,
+    deliberately not guarded at runtime.
+
+    Returns::
+
+        {group.key: {"status": "ok"|"skipped"|"error",
+                     "reason": str | None,
+                     "mode": "split"|"no_split",
+                     "streams": {stream_name: {...per-stream status...}}}}
+    """
+    override = split_override or {}
+    stream_items = [(k, v) for k, v in split.items() if not str(k).startswith("_")]
+    results: dict = {}
+    for group in groups:
+        use_split = bool(override.get(group.key, group.uses_main_data_split))
+        mode = "split" if use_split else "no_split"
+        try:
+            candidates = collate_fn(group.components)
+        except Exception as ex:
+            logging.warning("_run_formula_groups [%s]: collate failed: %s",
+                            group.key, ex)
+            results[group.key] = {"status": "error", "reason": f"collate: {ex}",
+                                  "mode": mode, "streams": {}}
+            continue
+        if candidates is None or (hasattr(candidates, "empty") and candidates.empty):
+            logging.warning("_run_formula_groups [%s]: no candidates — skipping",
+                            group.key)
+            results[group.key] = {"status": "skipped", "reason": "no candidates",
+                                  "mode": mode, "streams": {}}
+            continue
+        if use_split:
+            streams = {}
+            for name, stream_df in stream_items:
+                # Routing is pure data — group.narrow + config.NARROW_ROUTES —
+                # never a hardcoded group-key or stream-name branch here.
+                route = NARROW_ROUTES.get((group.narrow, name))
+                chosen = NARROW_FNS.get(route, narrow_fn)
+                streams[name] = _narrow_one_stream(
+                    group, candidates, stream_df, n_cols, ctx, chosen, escalations)
+        else:
+            # No-split (override only): no stream to route on → base narrow_fn.
+            streams = {"no_split": _narrow_one_stream(
+                group, candidates, None, n_cols, ctx, narrow_fn, escalations)}
+        results[group.key] = {"status": "ok", "reason": None,
+                              "mode": mode, "streams": streams}
     return results
